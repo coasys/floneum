@@ -18,9 +18,12 @@ impl RopeCache {
             })
             .collect::<Vec<_>>();
         let inverse_frequency_len = inverse_frequency.len();
-        let inverse_frequency =
+        let mut inverse_frequency =
             Tensor::from_vec(inverse_frequency, (1, inverse_frequency_len), device)?
                 .to_dtype(dtype)?;
+        if let Some(weight) = &config.rope_freq_weight {
+            inverse_frequency = inverse_frequency.mul(&weight.reshape((1, ()))?)?;
+        }
 
         let llama_context_length_indices =
             Tensor::arange(0f32, config.context_length as f32, device)?
@@ -90,12 +93,11 @@ impl RopeCache {
 #[test]
 fn test_rope_cache() {
     let config = LlamaConfig {
+        rope_freq_weight: None,
         rope_theta: 5000.,
         context_length: 6,
-        rope_dimension: 2,
         head_dimension: 2,
         n_head: 0,
-        n_kv_head: 0,
         n_layer: 0,
     };
     let device = Device::cuda_if_available(0).unwrap();
