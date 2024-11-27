@@ -52,7 +52,7 @@ use kalosm_common::*;
 
 use std::sync::{Arc, RwLock};
 
-use candle_core::{IndexOp, Tensor};
+use candle_core::{Device, IndexOp, Tensor};
 use candle_nn::VarBuilder;
 use tokenizers::{Encoding, PaddingParams, Tokenizer};
 
@@ -70,6 +70,7 @@ pub use crate::source::*;
 pub struct BertBuilder {
     source: BertSource,
     cache: kalosm_common::Cache,
+    device: Option<Device>,
 }
 
 impl BertBuilder {
@@ -89,6 +90,12 @@ impl BertBuilder {
     pub fn with_cache(mut self, cache: kalosm_common::Cache) -> Self {
         self.cache = cache;
 
+        self
+    }
+
+    /// Set the device to run the model with. (Defaults to an accelerator if available, otherwise the CPU)
+    pub fn with_device(mut self, device: Device) -> Self {
+        self.device = Some(device);
         self
     }
 
@@ -204,7 +211,11 @@ impl Bert {
         builder: BertBuilder,
         mut progress_handler: impl FnMut(ModelLoadingProgress) + Send + 'static,
     ) -> anyhow::Result<Self> {
-        let BertBuilder { source, cache } = builder;
+        let BertBuilder {
+            source,
+            cache,
+            device,
+        } = builder;
         let BertSource {
             config,
             tokenizer,
@@ -237,7 +248,12 @@ impl Bert {
         let config = std::fs::read_to_string(config_filename)?;
         let config: Config = serde_json::from_str(&config)?;
 
-        let device = accelerated_device_if_available()?;
+        let device = if let Some(d) = device {
+            d
+        } else {
+            accelerated_device_if_available()?
+        };
+
         let vb =
             unsafe { VarBuilder::from_mmaped_safetensors(&[&weights_filename], DTYPE, &device)? };
         let model = BertModel::load(vb, &config)?;
