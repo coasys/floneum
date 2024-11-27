@@ -35,6 +35,7 @@
 
 #![warn(missing_docs)]
 
+use candle_core::Device;
 use cpal::FromSample;
 use kalosm_common::FileSource;
 pub use kalosm_common::ModelLoadingProgress;
@@ -43,6 +44,7 @@ use kalosm_streams::text_stream::ChannelTextStream;
 use model::WhisperInner;
 use rodio::{source::UniformSourceIterator, Source};
 use std::{fmt::Display, ops::Range, str::FromStr, sync::Arc, time::Duration};
+use kalosm_common::accelerated_device_if_available;
 
 use anyhow::Result;
 
@@ -201,6 +203,8 @@ pub struct WhisperBuilder {
 
     /// The cache location to use for the model (defaults DATA_DIR/kalosm/cache)
     cache: kalosm_common::Cache,
+
+    device: Option<Device>,
 }
 
 impl Default for WhisperBuilder {
@@ -209,6 +213,7 @@ impl Default for WhisperBuilder {
             model: WhisperSource::default(),
             language: Some(WhisperLanguage::English),
             cache: kalosm_common::Cache::default(),
+            device: None,
         }
     }
 }
@@ -420,6 +425,12 @@ impl WhisperBuilder {
             })
             .await?;
 
+        let device = if let Some(d) = self.device.clone() {
+            d
+        } else {
+            accelerated_device_if_available()?
+        };
+
         let (rx, tx) = std::sync::mpsc::channel();
         let thread = std::thread::spawn(move || {
             tokio::runtime::Builder::new_current_thread()
@@ -427,7 +438,7 @@ impl WhisperBuilder {
                 .unwrap()
                 .block_on(async move {
                     let mut model =
-                        WhisperInner::new(self, filename, tokenizer_filename, config).unwrap();
+                        WhisperInner::new(self, filename, tokenizer_filename, config, device).unwrap();
                     while let Ok(message) = tx.recv() {
                         match message {
                             WhisperMessage::Kill => return,
@@ -463,6 +474,12 @@ impl WhisperBuilder {
     pub fn with_cache(mut self, cache: kalosm_common::Cache) -> Self {
         self.cache = cache;
 
+        self
+    }
+
+    /// Set the device to run the model with. (Defaults to an accelerator if available, otherwise the CPU)
+    pub fn with_device(mut self, device: Device) -> Self {
+        self.device = Some(device);
         self
     }
 }

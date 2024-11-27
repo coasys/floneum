@@ -10,7 +10,6 @@ use rand::{distributions::Distribution, SeedableRng};
 use tokenizers::Tokenizer;
 
 use candle_transformers::models::whisper::{self as m, audio, Config};
-use kalosm_common::accelerated_device_if_available;
 
 use crate::{quantized::TextDecoderCache, Task, WhisperBuilder, WhisperLanguage};
 
@@ -66,8 +65,8 @@ impl WhisperInner {
         weights_filename: PathBuf,
         tokenizer_filename: PathBuf,
         config_filename: PathBuf,
+        device: Device,
     ) -> anyhow::Result<Self> {
-        let device = accelerated_device_if_available()?;
         let tokenizer = Tokenizer::from_file(tokenizer_filename).map_err(E::msg)?;
         let config: Config = serde_json::from_str(&std::fs::read_to_string(config_filename)?)?;
 
