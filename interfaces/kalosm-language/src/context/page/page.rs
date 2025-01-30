@@ -1,6 +1,6 @@
 use super::browse::Tab;
 use super::{super::document::Document, NodeRef};
-use super::{extract_article, AnyNode};
+use super::{extract_article, AnyNode, ExtractDocumentError};
 use crate::context::page::crawl::Crawler;
 pub use crate::context::page::crawl::CrawlingCallback;
 use image::DynamicImage;
@@ -19,9 +19,13 @@ use url::Url;
 /// #[tokio::main]
 /// async fn main() {
 ///     let page = Page::new(
-///         Url::parse("https://www.nytimes.com/live/2023/09/21/world/zelensky-russia-ukraine-news").unwrap(),
+///         Url::parse(
+///             "https://www.nytimes.com/live/2023/09/21/world/zelensky-russia-ukraine-news",
+///         )
+///         .unwrap(),
 ///         BrowserMode::Static,
-///     ).unwrap();
+///     )
+///     .unwrap();
 ///     let document = page.article().await.unwrap();
 ///     println!("Title: {}", document.title());
 ///     println!("Body: {}", document.body());
@@ -116,7 +120,7 @@ impl Page {
     /// Extract the article from the page.
     pub async fn article(&self) -> anyhow::Result<Document> {
         match self {
-            Self::Static(page) => page.article().await,
+            Self::Static(page) => Ok(page.article().await?),
             Self::Dynamic(page) => page.article(),
         }
     }
@@ -157,11 +161,7 @@ impl Page {
     }
 
     /// Start crawling from this page.
-    pub async fn crawl(
-        start: Url,
-        mode: BrowserMode,
-        visit: impl CrawlingCallback,
-    ) -> anyhow::Result<()> {
+    pub async fn crawl(start: Url, mode: BrowserMode, visit: impl CrawlingCallback) {
         Crawler::new(mode, visit).crawl(start).await
     }
 }
@@ -209,7 +209,7 @@ impl StaticPage {
     }
 
     /// Get the HTML of the page.
-    pub async fn html_ref(&self) -> anyhow::Result<&Html> {
+    pub async fn html_ref(&self) -> Result<&Html, reqwest::Error> {
         match self.html.get() {
             Some(html) => Ok(html),
             None => {
@@ -228,7 +228,7 @@ impl StaticPage {
     }
 
     /// Extract the article from the page.
-    pub async fn article(&self) -> anyhow::Result<Document> {
+    pub async fn article(&self) -> Result<Document, ExtractDocumentError> {
         extract_article(&self.html_ref().await?.html())
     }
 

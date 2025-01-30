@@ -27,7 +27,10 @@ use syn::{DataEnum, Fields, FieldsNamed, LitInt, Path, TypePath, Variant};
 ///
 /// let parser = Person::new_parser();
 /// let state = parser.create_parser_state();
-/// let person = parser.parse(&state, b"{ \"name\": \"John\", \"age\": 30 } ").unwrap().unwrap_finished();
+/// let person = parser
+///     .parse(&state, b"{ \"name\": \"John\", \"age\": 30 } ")
+///     .unwrap()
+///     .unwrap_finished();
 /// assert_eq!(person.name, "John");
 /// assert_eq!(person.age, 30);
 /// ```
@@ -59,8 +62,19 @@ use syn::{DataEnum, Fields, FieldsNamed, LitInt, Path, TypePath, Variant};
 ///
 /// let parser = Action::new_parser();
 /// let state = parser.create_parser_state();
-/// let action = parser.parse(&state, b"{ \"type\": \"Search\", \"data\": { \"query\": \"my query\" } } ").unwrap().unwrap_finished();
-/// assert_eq!(action, Action::Search { query: "my query".to_string() });
+/// let action = parser
+///     .parse(
+///         &state,
+///         b"{ \"type\": \"Search\", \"data\": { \"query\": \"my query\" } } ",
+///     )
+///     .unwrap()
+///     .unwrap_finished();
+/// assert_eq!(
+///     action,
+///     Action::Search {
+///         query: "my query".to_string()
+///     }
+/// );
 /// ```
 ///
 /// ## Attributes
@@ -389,7 +403,9 @@ fn unit_schema(attrs: &[syn::Attribute], ty: &Ident) -> TokenStream2 {
     quote! {
         impl kalosm_sample::Schema for #ty {
             fn schema() -> kalosm_sample::SchemaType {
-                kalosm_sample::SchemaType::Const(kalosm_sample::ConstSchema::new(kalosm_sample::SchemaLiteral::String(#name.to_string())))
+                kalosm_sample::SchemaType::Enum(kalosm_sample::EnumSchema::new([
+                    kalosm_sample::SchemaLiteral::String(#name.to_string())
+                ]))
             }
         }
     }
@@ -543,8 +559,8 @@ impl EnumParser {
         Ok(quote! {
             impl kalosm_sample::Schema for #ty {
                 fn schema() -> kalosm_sample::SchemaType {
-                    kalosm_sample::SchemaType::OneOf(
-                        kalosm_sample::OneOfSchema::new([
+                    kalosm_sample::SchemaType::AnyOf(
+                        kalosm_sample::AnyOfSchema::new([
                             #(#variants),*
                         ])
                     )
@@ -672,10 +688,10 @@ impl UnitEnumVariantParser {
                 kalosm_sample::JsonObjectSchema::new([
                     kalosm_sample::JsonPropertySchema::new(
                         #tag,
-                        kalosm_sample::SchemaType::Const(
-                            kalosm_sample::ConstSchema::new(
+                        kalosm_sample::SchemaType::Enum(
+                            kalosm_sample::EnumSchema::new([
                                 kalosm_sample::SchemaLiteral::String(#variant_name.to_string())
-                            )
+                            ])
                         )
                     )
                     .with_required(true)
@@ -728,10 +744,10 @@ impl StructEnumVariantParser {
                 kalosm_sample::JsonObjectSchema::new([
                     kalosm_sample::JsonPropertySchema::new(
                         #tag,
-                        kalosm_sample::SchemaType::Const(
-                            kalosm_sample::ConstSchema::new(
+                        kalosm_sample::SchemaType::Enum(
+                            kalosm_sample::EnumSchema::new([
                                 kalosm_sample::SchemaLiteral::String(#variant_name.to_string())
-                            )
+                            ])
                         )
                     )
                     .with_required(true),
@@ -793,10 +809,10 @@ impl TupleEnumVariantParser {
                 kalosm_sample::JsonObjectSchema::new([
                     kalosm_sample::JsonPropertySchema::new(
                         #tag,
-                        kalosm_sample::SchemaType::Const(
-                            kalosm_sample::ConstSchema::new(
+                        kalosm_sample::SchemaType::Enum(
+                            kalosm_sample::EnumSchema::new([
                                 kalosm_sample::SchemaLiteral::String(#variant_name.to_string())
-                            )
+                            ])
                         )
                     )
                     .with_required(true),
@@ -1505,7 +1521,18 @@ impl StringParserOptions {
 impl ToTokens for StringParserOptions {
     fn to_tokens(&self, tokens: &mut TokenStream2) {
         if let Some(pattern) = &self.pattern {
-            let pattern = LitStr::new(&format!(r#""{}""#, pattern.value()), pattern.span());
+            let pattern_str = pattern.value();
+            let mut pattern_str = pattern_str.as_str();
+            // Strip the ^ and $ from the pattern if they are present. The parser will automatically parse the whole contents
+            if let Some(new_pattern_str) = pattern_str.strip_prefix("^") {
+                pattern_str = new_pattern_str;
+            }
+            if !pattern_str.ends_with("\\$") {
+                if let Some(new_pattern_str) = pattern_str.strip_suffix('$') {
+                    pattern_str = new_pattern_str;
+                }
+            }
+            let pattern = LitStr::new(&format!(r#""{}""#, pattern_str), pattern.span());
             let quote = quote_spanned! {
                 pattern.span() =>
                 kalosm_sample::ParserExt::map_output(

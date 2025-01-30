@@ -2,7 +2,7 @@ use futures_util::StreamExt;
 use kalosm::language::*;
 use kalosm::sound::*;
 use std::sync::Arc;
-use surrealdb::{engine::local::RocksDb, Surreal};
+use surrealdb::{engine::local::SurrealKv, Surreal};
 
 #[tokio::main]
 async fn main() -> Result<(), anyhow::Error> {
@@ -10,7 +10,7 @@ async fn main() -> Result<(), anyhow::Error> {
     let model = Whisper::new().await?;
 
     // Create database connection
-    let db = Surreal::new::<RocksDb>("./db/temp.db").await.unwrap();
+    let db = Surreal::new::<SurrealKv>("./db/temp.db").await.unwrap();
 
     // Select a specific namespace / database
     db.use_ns("live_qa").use_db("documents").await.unwrap();
@@ -33,7 +33,6 @@ async fn main() -> Result<(), anyhow::Error> {
             // Chunk the audio into chunks based on voice activity
             let mut audio_chunks = mic_input
                 .stream()
-                .unwrap()
                 .voice_activity_stream()
                 .rechunk_voice_activity();
             while let Some(input) = audio_chunks.next().await {
@@ -51,7 +50,7 @@ async fn main() -> Result<(), anyhow::Error> {
 
     // Create a llama chat model
     let model = Llama::new_chat().await.unwrap();
-    let mut chat = Chat::builder(model).with_system_prompt("The assistant help answer questions based on the context given by the user. The model knows that the information the user gives it is always true.").build();
+    let mut chat = model.chat().with_system_prompt("The assistant help answer questions based on the context given by the user. The model knows that the information the user gives it is always true.");
 
     loop {
         // Ask the user for a question
@@ -82,7 +81,7 @@ async fn main() -> Result<(), anyhow::Error> {
         println!("{}", prompt);
 
         // And finally, respond to the user
-        let mut output_stream = chat.add_message(prompt);
+        let mut output_stream = chat(&prompt);
         print!("Bot: ");
         output_stream.to_std_out().await.unwrap();
     }

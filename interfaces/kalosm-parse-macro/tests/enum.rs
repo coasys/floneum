@@ -32,14 +32,11 @@ async fn named_enum() {
         .await
         .unwrap();
 
-    let task = Task::builder("You generate json")
-        .with_constraints(NamedEnum::new_parser())
-        .build();
+    let task = model
+        .task("You generate json")
+        .with_constraints(NamedEnum::new_parser());
 
-    let output = task
-        .run("What is the capital of France?", &model)
-        .all_text()
-        .await;
+    let output = task.run("What is the capital of France?").await;
     println!("{output}");
 
     assert!(output.contains("\"ty\":"));
@@ -67,11 +64,11 @@ fn mixed_enum_schema() {
     assert_eq!(
         json,
         serde_json::json!({
-            "oneOf": [
+            "anyOf": [
                 {
                     "type": "object",
                     "properties": {
-                        "type": { "const": "Person" },
+                        "type": { "enum": ["Person"] },
                         "data": {
                             "type": "object",
                             "properties": {
@@ -90,7 +87,7 @@ fn mixed_enum_schema() {
                 {
                     "type": "object",
                     "properties": {
-                        "type": { "const": "Animal" }
+                        "type": { "enum": ["Animal"] }
                     },
                     "required": ["type"],
                     "additionalProperties": false
@@ -98,7 +95,7 @@ fn mixed_enum_schema() {
                 {
                     "type": "object",
                     "properties": {
-                        "type": { "const": "Turtle" },
+                        "type": { "enum": ["Turtle"] },
                         "data": { "type": "string" }
                     },
                     "required": ["type", "data"],
@@ -120,14 +117,11 @@ async fn mixed_enum() {
         .await
         .unwrap();
 
-    let task = Task::builder("You generate json")
-        .with_constraints(MixedEnum::new_parser())
-        .build();
+    let task = model
+        .task("You generate json")
+        .with_constraints(std::sync::Arc::new(MixedEnum::new_parser()));
 
-    let output = task
-        .run("What is the capital of France?", &model)
-        .all_text()
-        .await;
+    let output = task.run("What is the capital of France?").await;
     println!("{output}");
 }
 
@@ -163,14 +157,11 @@ async fn unit_enum() {
         .await
         .unwrap();
 
-    let task = Task::builder("You generate json")
-        .with_constraints(UnitEnum::new_parser())
-        .build();
+    let task = model
+        .task("You generate json")
+        .with_constraints(std::sync::Arc::new(UnitEnum::new_parser()));
 
-    let output = task
-        .run("What is the capital of France?", &model)
-        .all_text()
-        .await;
+    let output = task.run("What is the capital of France?").await;
     println!("{output}");
 }
 
@@ -190,14 +181,11 @@ async fn tuple_enum() {
         .await
         .unwrap();
 
-    let task = Task::builder("You generate json")
-        .with_constraints(TupleEnum::new_parser())
-        .build();
+    let task = model
+        .task("You generate json")
+        .with_constraints(std::arc::Arc::new(TupleEnum::new_parser()));
 
-    let output = task
-        .run("What is the capital of France?", &model)
-        .all_text()
-        .await;
+    let output = task.run("What is the capital of France?").await;
     println!("{output}");
 
     assert!(output.contains("\"type\": \"First\"") || output.contains("\"type\": \"Second\""));

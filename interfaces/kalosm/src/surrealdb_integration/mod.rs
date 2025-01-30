@@ -4,8 +4,7 @@ use serde::{Deserialize, Serialize};
 use std::future::{Future, IntoFuture};
 use std::ops::Range;
 use std::pin::Pin;
-use surrealdb::sql::{Id, Thing};
-use surrealdb::{Connection, Surreal};
+use surrealdb::{Connection, RecordId, RecordIdKey, Surreal};
 
 #[cfg(feature = "language")]
 pub(crate) mod document_table;
@@ -51,7 +50,7 @@ impl From<VectorDbError> for EmbeddedIndexedTableError {
 /// This type is stored in the [`EmbeddingIndexedTable::table_links`] table.
 #[derive(Serialize, Deserialize)]
 pub struct DocumentLink {
-    document_id: Id,
+    document_id: RecordIdKey,
     byte_range: std::ops::Range<usize>,
 }
 
@@ -60,20 +59,19 @@ pub struct DocumentLink {
 /// This type is stored in the [`EmbeddingIndexedTable::table`] table.
 #[derive(Serialize, Deserialize)]
 pub struct ObjectWithEmbeddingIds<T> {
-    #[serde(flatten)]
     object: T,
     chunks: Vec<(Range<usize>, Vec<EmbeddingId>)>,
 }
 
 /// A table in a surreal database with a primary key tied to an embedding in a vector database.
-pub struct EmbeddingIndexedTable<C: Connection, R, S = UnknownVectorSpace> {
+pub struct EmbeddingIndexedTable<C: Connection, R> {
     table: String,
     db: Surreal<C>,
-    vector_db: VectorDB<S>,
+    vector_db: VectorDB,
     phantom: std::marker::PhantomData<R>,
 }
 
-impl<C: Connection, R, S: VectorSpace> EmbeddingIndexedTable<C, R, S> {
+impl<C: Connection, R> EmbeddingIndexedTable<C, R> {
     /// Get the name of the table.
     pub fn table(&self) -> &str {
         &self.table
@@ -85,7 +83,7 @@ impl<C: Connection, R, S: VectorSpace> EmbeddingIndexedTable<C, R, S> {
     }
 
     /// Get the raw vector database.
-    pub fn vector_db(&self) -> &VectorDB<S> {
+    pub fn vector_db(&self) -> &VectorDB {
         &self.vector_db
     }
 
@@ -95,7 +93,7 @@ impl<C: Connection, R, S: VectorSpace> EmbeddingIndexedTable<C, R, S> {
     }
 
     /// Delete the table from the database and clear the vector database. Returns the contents of the table.
-    pub async fn delete_table(self) -> Result<Vec<(R, Vec<Chunk<S>>)>, EmbeddedIndexedTableError>
+    pub async fn delete_table(self) -> Result<Vec<(R, Vec<Chunk>)>, EmbeddedIndexedTableError>
     where
         R: DeserializeOwned,
     {
@@ -127,29 +125,24 @@ impl<C: Connection, R, S: VectorSpace> EmbeddingIndexedTable<C, R, S> {
     /// Insert a new record into the table with the given embedding.
     pub async fn insert(
         &self,
-        chunks: impl IntoIterator<Item = Chunk<S>>,
+        chunks: impl IntoIterator<Item = Chunk>,
         value: R,
-    ) -> Result<Id, EmbeddedIndexedTableError>
+    ) -> Result<RecordIdKey, EmbeddedIndexedTableError>
     where
-        R: Serialize + DeserializeOwned,
+        R: Serialize + DeserializeOwned + 'static,
     {
-        let id = Id::uuid();
+        let id_uuid = surrealdb::sql::Uuid::new_v7().0;
+        let id = RecordIdKey::from(id_uuid);
 
         let mut embedding_ids = Vec::new();
-        let thing = Thing {
-            tb: self.table.clone(),
-            id: id.clone(),
-        };
+        let thing = RecordId::from_table_key(self.table.clone(), id.clone());
 
         for chunk in chunks {
             let chunk_embedding_ids = self.vector_db.add_embeddings(chunk.embeddings)?;
             for embedding_id in &chunk_embedding_ids {
                 let byte_range = chunk.byte_range.clone();
 
-                let link = Thing {
-                    tb: self.table_links(),
-                    id: Id::Number(embedding_id.0 as i64),
-                };
+                let link = RecordId::from_table_key(self.table_links(), embedding_id.0 as i64);
                 self.db
                     .create::<Option<DocumentLink>>(link)
                     .content(DocumentLink {
@@ -173,45 +166,50 @@ impl<C: Connection, R, S: VectorSpace> EmbeddingIndexedTable<C, R, S> {
     }
 
     /// Update a record in the table with the given embedding id.
-    pub async fn update(&self, id: Id, value: R) -> Result<Option<R>, EmbeddedIndexedTableError>
+    pub async fn update(
+        &self,
+        id: impl Into<RecordIdKey>,
+        value: R,
+    ) -> Result<Option<R>, EmbeddedIndexedTableError>
     where
-        R: Serialize + DeserializeOwned,
+        R: Serialize + DeserializeOwned + 'static,
     {
-        let thing = Thing {
-            tb: self.table.clone(),
-            id,
-        };
-        let old = self.db.update::<Option<R>>(thing).merge(value).await?;
+        let thing = RecordId::from_table_key(self.table.clone(), id);
+        let old = self
+            .db
+            .update::<Option<ObjectWithEmbeddingIds<R>>>(thing)
+            .merge(value)
+            .await?;
 
-        Ok(old)
+        Ok(old.map(|v| v.object))
     }
 
     /// Select a record from the table with the given embedding id.
-    pub async fn select(&self, id: Id) -> Result<R, EmbeddedIndexedTableError>
+    pub async fn select(&self, id: impl Into<RecordIdKey>) -> Result<R, EmbeddedIndexedTableError>
     where
         R: DeserializeOwned,
     {
-        let thing = Thing {
-            tb: self.table.clone(),
-            id,
-        };
-        let record = self.db.select::<Option<R>>(thing).await?;
+        let thing = RecordId::from_table_key(self.table.clone(), id);
+        let record = self
+            .db
+            .select::<Option<ObjectWithEmbeddingIds<R>>>(thing)
+            .await?;
         match record {
-            Some(record) => Ok(record),
+            Some(record) => Ok(record.object),
             None => Err(EmbeddedIndexedTableError::RecordNotFound),
         }
     }
 
     /// Delete a record from the table with the given embedding id.
-    pub async fn delete(&self, id: Id) -> Result<Option<R>, EmbeddedIndexedTableError>
+    pub async fn delete(
+        &self,
+        id: impl Into<RecordIdKey>,
+    ) -> Result<Option<R>, EmbeddedIndexedTableError>
     where
         R: Serialize + DeserializeOwned,
     {
         // First delete the record from the main table
-        let thing = Thing {
-            tb: self.table.clone(),
-            id,
-        };
+        let thing = RecordId::from_table_key(self.table.clone(), id);
         let old = self
             .db
             .delete::<Option<ObjectWithEmbeddingIds<R>>>(thing)
@@ -228,10 +226,7 @@ impl<C: Connection, R, S: VectorSpace> EmbeddingIndexedTable<C, R, S> {
                 .flat_map(|(_, ids)| ids.iter())
                 .copied()
             {
-                let link = Thing {
-                    tb: self.table_links(),
-                    id: Id::Number(id.0 as i64),
-                };
+                let link = RecordId::from_table_key(self.table_links(), id.0 as i64);
                 self.db.delete::<Option<DocumentLink>>(link).await?;
                 // Then delete the embedding from the vector db
                 self.vector_db.remove_embedding(id)?;
@@ -248,15 +243,18 @@ impl<C: Connection, R, S: VectorSpace> EmbeddingIndexedTable<C, R, S> {
     where
         R: DeserializeOwned,
     {
-        let records = self.db.select::<Vec<R>>(self.table.clone()).await?;
-        Ok(records)
+        let records = self
+            .db
+            .select::<Vec<ObjectWithEmbeddingIds<R>>>(self.table.clone())
+            .await?;
+        Ok(records.into_iter().map(|v| v.object).collect())
     }
 
     /// Search for records that are close to the given embedding.
     pub fn search<'a>(
         &'a self,
-        embedding: &'a Embedding<S>,
-    ) -> EmbeddingIndexedTableSearchBuilder<'a, C, R, S> {
+        embedding: &'a Embedding,
+    ) -> EmbeddingIndexedTableSearchBuilder<'a, C, R> {
         EmbeddingIndexedTableSearchBuilder {
             table: self,
             embedding,
@@ -268,20 +266,18 @@ impl<C: Connection, R, S: VectorSpace> EmbeddingIndexedTable<C, R, S> {
 }
 
 /// A trait for anything that can be used to filter the results of an embedded table search.
-pub trait IntoEmbeddingIndexedTableSearchFilter<C: Connection, R, S: VectorSpace, Marker> {
+pub trait IntoEmbeddingIndexedTableSearchFilter<C: Connection, R, Marker> {
     /// Convert the filter into a set of candidates.
     fn into_embedding_indexed_table_search_filter(
         self,
-        db: &EmbeddingIndexedTable<C, R, S>,
+        db: &EmbeddingIndexedTable<C, R>,
     ) -> impl std::future::Future<Output = Result<Candidates, EmbeddedIndexedTableError>> + Send;
 }
 
-impl<C: Connection, R: Send + Sync, S: VectorSpace>
-    IntoEmbeddingIndexedTableSearchFilter<C, R, S, ()> for Candidates
-{
+impl<C: Connection, R: Send + Sync> IntoEmbeddingIndexedTableSearchFilter<C, R, ()> for Candidates {
     async fn into_embedding_indexed_table_search_filter(
         self,
-        _: &EmbeddingIndexedTable<C, R, S>,
+        _: &EmbeddingIndexedTable<C, R>,
     ) -> Result<Candidates, EmbeddedIndexedTableError> {
         Ok(self)
     }
@@ -290,24 +286,21 @@ impl<C: Connection, R: Send + Sync, S: VectorSpace>
 /// A marker type that allows kalosm to specialize the [`IntoEmbeddingIndexedTableSearchFilter`] trait for iterators.
 pub struct IteratorMarker;
 
-impl<C: Connection, R: DeserializeOwned + Send + Sync, S: VectorSpace, I>
-    IntoEmbeddingIndexedTableSearchFilter<C, R, S, IteratorMarker> for I
+impl<C: Connection, R: DeserializeOwned + Send + Sync, I>
+    IntoEmbeddingIndexedTableSearchFilter<C, R, IteratorMarker> for I
 where
-    I: IntoIterator<Item = Id>,
+    I: IntoIterator<Item = RecordIdKey>,
     I::IntoIter: Send + Sync + 'static,
 {
     fn into_embedding_indexed_table_search_filter(
         self,
-        table: &EmbeddingIndexedTable<C, R, S>,
+        table: &EmbeddingIndexedTable<C, R>,
     ) -> impl Future<Output = Result<Candidates, EmbeddedIndexedTableError>> + Send {
         let ids = self.into_iter();
         async move {
             let mut candidates = Candidates::new();
             for id in ids {
-                let thing = Thing {
-                    tb: table.table.clone(),
-                    id,
-                };
+                let thing = RecordId::from_table_key(table.table.clone(), id);
                 let item: Option<ObjectWithEmbeddingIds<R>> = table.db.select(thing).await?;
                 if let Some(item) = item {
                     for (_, embeddings) in item.chunks.iter() {
@@ -323,29 +316,16 @@ where
 }
 
 /// A builder for searching for embeddings in a vector database.
-pub struct EmbeddingIndexedTableSearchBuilder<
-    'a,
-    C: Connection,
-    R,
-    S: VectorSpace,
-    F = Candidates,
-    M = (),
-> {
-    table: &'a EmbeddingIndexedTable<C, R, S>,
-    embedding: &'a Embedding<S>,
+pub struct EmbeddingIndexedTableSearchBuilder<'a, C: Connection, R, F = Candidates, M = ()> {
+    table: &'a EmbeddingIndexedTable<C, R>,
+    embedding: &'a Embedding,
     results: Option<usize>,
     filter: Option<F>,
     phantom: std::marker::PhantomData<M>,
 }
 
-impl<
-        'a,
-        C: Connection,
-        R: DeserializeOwned,
-        S: VectorSpace,
-        F: IntoEmbeddingIndexedTableSearchFilter<C, R, S, M>,
-        M,
-    > EmbeddingIndexedTableSearchBuilder<'a, C, R, S, F, M>
+impl<C: Connection, R: DeserializeOwned, F: IntoEmbeddingIndexedTableSearchFilter<C, R, M>, M>
+    EmbeddingIndexedTableSearchBuilder<'_, C, R, F, M>
 {
     /// Set the number of results to return. Defaults to 10.
     pub fn with_results(mut self, results: usize) -> Self {
@@ -374,10 +354,10 @@ impl<
             let main_table_id = self
                 .table
                 .db
-                .select::<Option<DocumentLink>>(Thing {
-                    tb: self.table.table_links(),
-                    id: Id::Number(id.value.0 as i64),
-                })
+                .select::<Option<DocumentLink>>(RecordId::from_table_key(
+                    self.table.table_links(),
+                    id.value.0 as i64,
+                ))
                 .await?
                 .ok_or(EmbeddedIndexedTableError::RecordNotFound)?;
             let record = self.table.select(main_table_id.document_id.clone()).await?;
@@ -397,10 +377,9 @@ impl<
         'a,
         C: Connection + 'a,
         R: DeserializeOwned + Send + Sync + 'a,
-        S: VectorSpace + 'a,
-        F: IntoEmbeddingIndexedTableSearchFilter<C, R, S, M> + Send + 'a,
+        F: IntoEmbeddingIndexedTableSearchFilter<C, R, M> + Send + 'a,
         M: Send + 'a,
-    > IntoFuture for EmbeddingIndexedTableSearchBuilder<'a, C, R, S, F, M>
+    > IntoFuture for EmbeddingIndexedTableSearchBuilder<'a, C, R, F, M>
 {
     type IntoFuture = Pin<Box<dyn Future<Output = Self::Output> + Send + 'a>>;
     type Output = Result<Vec<EmbeddingIndexedTableSearchResult<R>>, EmbeddedIndexedTableError>;
@@ -410,16 +389,14 @@ impl<
     }
 }
 
-impl<'a, C: Connection, R: DeserializeOwned, S: VectorSpace>
-    EmbeddingIndexedTableSearchBuilder<'a, C, R, S>
-{
+impl<'a, C: Connection, R: DeserializeOwned> EmbeddingIndexedTableSearchBuilder<'a, C, R> {
     /// Set a filter to apply to the results. Only vectors that pass the filter will be returned.
     pub fn with_filter<Marker, F>(
         self,
         filter: F,
-    ) -> EmbeddingIndexedTableSearchBuilder<'a, C, R, S, F, Marker>
+    ) -> EmbeddingIndexedTableSearchBuilder<'a, C, R, F, Marker>
     where
-        F: IntoEmbeddingIndexedTableSearchFilter<C, R, S, Marker>,
+        F: IntoEmbeddingIndexedTableSearchFilter<C, R, Marker>,
     {
         EmbeddingIndexedTableSearchBuilder {
             table: self.table,
@@ -439,7 +416,7 @@ pub struct EmbeddingIndexedTableSearchResult<R> {
     /// The embedding id of the record.
     pub id: EmbeddingId,
     /// The record id.
-    pub record_id: Id,
+    pub record_id: RecordIdKey,
     /// The byte range of the record.
     pub byte_range: std::ops::Range<usize>,
     /// The record.
@@ -483,9 +460,9 @@ impl<C: Connection> EmbeddingIndexedTableBuilder<C> {
     }
 
     /// Build the document table.
-    pub fn build<S: VectorSpace, R: Serialize + DeserializeOwned>(
+    pub fn build<R: Serialize + DeserializeOwned>(
         self,
-    ) -> Result<EmbeddingIndexedTable<C, R, S>, EmbeddedIndexedTableError> {
+    ) -> Result<EmbeddingIndexedTable<C, R>, EmbeddedIndexedTableError> {
         let vector_db = if let Some(location) = self.location {
             VectorDB::new_at(location)?
         } else {

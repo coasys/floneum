@@ -94,8 +94,10 @@ impl<F: FnMut(&Url) -> bool> LinkFilter for F {
 ///     let count = Arc::new(AtomicUsize::new(0));
 ///     let real_visited = Arc::new(AtomicUsize::new(0));
 ///     Page::crawl(
-///         Url::parse("https://www.nytimes.com/live/2023/09/21/world/zelensky-russia-ukraine-news")
-///             .unwrap(),
+///         Url::parse(
+///             "https://www.nytimes.com/live/2023/09/21/world/zelensky-russia-ukraine-news",
+///         )
+///         .unwrap(),
 ///         BrowserMode::Static,
 ///         move |page: Page| {
 ///             let count = count.clone();
@@ -126,8 +128,7 @@ impl<F: FnMut(&Url) -> bool> LinkFilter for F {
 ///             }) as Pin<Box<dyn Future<Output = CrawlFeedback>>>
 ///         },
 ///     )
-///     .await
-///     .unwrap();
+///     .await;
 /// }
 /// ```
 pub trait CrawlingCallback: Send + Sync + 'static {
@@ -239,21 +240,19 @@ impl<T: CrawlingCallback> Crawler<T> {
         self.active.abort();
     }
 
-    pub async fn crawl(&mut self, url: Url) -> anyhow::Result<()> {
+    pub async fn crawl(&mut self, url: Url) {
         if self.is_aborted() {
-            return Ok(());
+            return;
         }
 
-        self.add_urls(vec![url]).await?;
+        self.add_urls(vec![url]).await;
 
         self.active.wait().await;
-
-        Ok(())
     }
 
-    async fn add_urls(&self, urls: Vec<Url>) -> anyhow::Result<()> {
+    async fn add_urls(&self, urls: Vec<Url>) {
         if self.is_aborted() {
-            return Ok(());
+            return;
         }
 
         for url in urls {
@@ -263,32 +262,30 @@ impl<T: CrawlingCallback> Crawler<T> {
                 continue;
             }
 
-            let mut queue = DomainQueue::new(origin.clone(), self.clone()).await?;
+            let mut queue = DomainQueue::new(origin.clone(), self.clone()).await;
             queue.push(url);
             self.queued.insert(origin, queue);
         }
-
-        Ok(())
     }
 }
 
-async fn try_get_robot(origin: &Origin) -> anyhow::Result<Option<Robot>> {
+async fn try_get_robot(origin: &Origin) -> Option<Robot> {
     let robots_txt_url = origin.ascii_serialization() + "/robots.txt";
-    let robots_txt_url = Url::parse(&robots_txt_url)?;
+    let robots_txt_url = Url::parse(&robots_txt_url).ok()?;
     let robots_txt_content = match reqwest::get(robots_txt_url.clone()).await {
         Ok(response) => match response.text().await {
             Ok(text) => text,
             Err(_) => {
-                return Ok(None);
+                return None;
             }
         },
         Err(_) => {
-            return Ok(None);
+            return None;
         }
     };
     let current_package_name = option_env!("CARGO_BIN_NAME").unwrap_or("Crawler");
-    let robots_txt = Robot::new(&robots_txt_content, current_package_name.as_bytes())?;
-    Ok(Some(robots_txt))
+    let robots_txt = Robot::new(&robots_txt_content, current_package_name.as_bytes()).ok()?;
+    Some(robots_txt)
 }
 
 struct DomainQueue<T> {
@@ -299,8 +296,8 @@ struct DomainQueue<T> {
 }
 
 impl<T: CrawlingCallback> DomainQueue<T> {
-    async fn new(origin: Origin, crawler: Crawler<T>) -> anyhow::Result<Self> {
-        let robots_txt = try_get_robot(&origin).await?;
+    async fn new(origin: Origin, crawler: Crawler<T>) -> Self {
+        let robots_txt = try_get_robot(&origin).await;
         let (queue, mut rx) = tokio::sync::mpsc::unbounded_channel::<Url>();
 
         let pool = get_local_pool();
@@ -330,9 +327,7 @@ impl<T: CrawlingCallback> DomainQueue<T> {
                         CrawlFeedback::Continue(mut filter) => match page.links().await {
                             Ok(mut new_urls) => {
                                 new_urls.retain(|url| filter.follow_link(url));
-                                if let Err(err) = crawler.add_urls(new_urls).await {
-                                    tracing::error!("Error adding urls: {}", err);
-                                }
+                                crawler.add_urls(new_urls).await;
                             }
                             Err(err) => tracing::error!("Error getting links: {}", err),
                         },
@@ -346,12 +341,12 @@ impl<T: CrawlingCallback> DomainQueue<T> {
             })
         };
 
-        Ok(Self {
+        Self {
             task,
             queue,
             visited: HashSet::new(),
             crawler,
-        })
+        }
     }
 
     fn abort(&self) {
