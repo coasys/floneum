@@ -240,7 +240,7 @@ impl Bert {
     async fn from_builder(
         builder: BertBuilder,
         mut progress_handler: impl FnMut(ModelLoadingProgress) + Send + 'static,
-    ) -> anyhow::Result<Self> {
+    ) -> Result<Self, BertLoadingError> {
         let BertBuilder {
             source,
             cache,
