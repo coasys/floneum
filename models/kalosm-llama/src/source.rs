@@ -272,11 +272,6 @@ impl LlamaSource {
             "main".to_string(),
             "tinyllama-1.1b-chat-v1.0.Q4_K_M.gguf".to_string(),
         ))
-        .with_tokenizer(FileSource::huggingface(
-            "TinyLlama/TinyLlama-1.1B-Chat-v1.0".to_string(),
-            "main".to_string(),
-            "tokenizer.json".to_string(),
-        ))
         .with_group_query_attention(4)
     }
 
@@ -286,11 +281,6 @@ impl LlamaSource {
             "https://huggingface.co/TheBloke/TinyLlama-1.1B-Chat-v1.0-GGUF".to_string(),
             "main".to_string(),
             "tinyllama-1.1b-chat-v1.0.Q4_K_M.gguf".to_string(),
-        ))
-        .with_tokenizer(FileSource::huggingface(
-            "TinyLlama/TinyLlama-1.1B-Chat-v1.0".to_string(),
-            "main".to_string(),
-            "tokenizer.json".to_string(),
         ))
         .with_group_query_attention(4)
     }
