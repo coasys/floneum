@@ -94,7 +94,7 @@ struct PdfText {
 }
 
 fn filter_func(object_id: (u32, u16), object: &mut Object) -> Option<((u32, u16), Object)> {
-    if IGNORE.contains(&object.type_name().unwrap_or_default()) {
+    if IGNORE.contains(&object.type_name().unwrap_or_default().as_bytes()) {
         return None;
     }
     if let Ok(d) = object.as_dict_mut() {
