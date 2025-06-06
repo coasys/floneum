@@ -36,12 +36,11 @@ async fn main() -> Result<(), anyhow::Error> {
                 .voice_activity_stream()
                 .rechunk_voice_activity();
             while let Some(input) = audio_chunks.next().await {
-                if let Ok(mut transcribed) = model.transcribe(input) {
-                    while let Some(transcribed) = transcribed.next().await {
-                        if transcribed.probability_of_no_speech() < 0.10 {
-                            let document = transcribed.text().into_document().await.unwrap();
-                            document_table.insert(document).await.unwrap();
-                        }
+                let mut transcribed = model.transcribe(input);
+                while let Some(transcribed) = transcribed.next().await {
+                    if transcribed.probability_of_no_speech() < 0.10 {
+                        let document = transcribed.text().into_document().await.unwrap();
+                        document_table.insert(document).await.unwrap();
                     }
                 }
             }
@@ -78,7 +77,7 @@ async fn main() -> Result<(), anyhow::Error> {
         );
 
         // Display the prompt to the user for debugging purposes
-        println!("{}", prompt);
+        println!("{prompt}");
 
         // And finally, respond to the user
         let mut output_stream = chat(&prompt);

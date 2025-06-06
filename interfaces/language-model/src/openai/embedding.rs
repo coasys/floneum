@@ -1,6 +1,6 @@
 use super::{NoOpenAIAPIKeyError, OpenAICompatibleClient};
 use crate::{Embedder, Embedding, ModelBuilder};
-use kalosm_common::ModelLoadingProgress;
+use kalosm_model_types::ModelLoadingProgress;
 use serde::Deserialize;
 use std::future::Future;
 use thiserror::Error;
@@ -142,7 +142,7 @@ impl Embedder for OpenAICompatibleEmbeddingModel {
             .reqwest_client
             .post(format!("{}/embeddings", self.client.base_url()))
             .header("Content-Type", "application/json")
-            .header("Authorization", format!("Bearer {}", api_key))
+            .header("Authorization", format!("Bearer {api_key}"))
             .json(&serde_json::json!({
                 "input": input,
                 "model": self.model
@@ -164,7 +164,7 @@ impl Embedder for OpenAICompatibleEmbeddingModel {
             .reqwest_client
             .post(format!("{}/embeddings", self.client.base_url()))
             .header("Content-Type", "application/json")
-            .header("Authorization", format!("Bearer {}", api_key))
+            .header("Authorization", format!("Bearer {api_key}"))
             .json(&serde_json::json!({
                 "input": input,
                 "model": self.model
@@ -209,10 +209,10 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(embeddings.len(), 1);
-        assert!(!embeddings[0].to_vec().is_empty());
+        assert!(!embeddings[0].vector().is_empty());
 
         let embeddings = model.embed("Hello, world!").await.unwrap();
-        assert!(!embeddings.to_vec().is_empty());
+        assert!(!embeddings.vector().is_empty());
     }
 
     #[tokio::test]
@@ -226,9 +226,9 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(embeddings.len(), 1);
-        assert!(!embeddings[0].to_vec().is_empty());
+        assert!(!embeddings[0].vector().is_empty());
 
         let embeddings = model.embed("Hello, world!").await.unwrap();
-        assert!(!embeddings.to_vec().is_empty());
+        assert!(!embeddings.vector().is_empty());
     }
 }

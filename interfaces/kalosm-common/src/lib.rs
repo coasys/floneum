@@ -1,6 +1,11 @@
-use std::{fmt::Display, future::Future, path::PathBuf, pin::Pin, sync::OnceLock};
+use std::sync::{Arc, OnceLock};
 
-use candle_core::{backend::BackendStorage, utils::*, Device, Storage, Tensor, WithDType};
+use candle_core::{
+    backend::BackendStorage,
+    quantized::{GgmlDType, QMatMul, QTensor},
+    utils::*,
+    Device, Storage, Tensor, WithDType,
+};
 
 mod cache;
 pub use cache::*;
@@ -34,61 +39,6 @@ pub fn accelerated_device_if_available() -> candle_core::Result<Device> {
     Ok(device)
 }
 
-/// A source for a file, either from Hugging Face or a local path
-#[derive(Clone, Debug)]
-pub enum FileSource {
-    /// A file from Hugging Face
-    HuggingFace {
-        /// The model id to use
-        model_id: String,
-        /// The revision to use
-        revision: String,
-        /// The file to use
-        file: String,
-    },
-    /// A local file
-    Local(PathBuf),
-}
-
-impl Display for FileSource {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        match self {
-            FileSource::HuggingFace {
-                model_id,
-                revision,
-                file,
-            } => write!(f, "hf://{}/{}/{}", model_id, revision, file),
-            FileSource::Local(path) => write!(f, "{}", path.display()),
-        }
-    }
-}
-
-impl FileSource {
-    /// Create a new source for a file from Hugging Face
-    pub fn huggingface(
-        model_id: impl ToString,
-        revision: impl ToString,
-        file: impl ToString,
-    ) -> Self {
-        Self::HuggingFace {
-            model_id: model_id.to_string(),
-            revision: revision.to_string(),
-            file: file.to_string(),
-        }
-    }
-
-    /// Create a new source for a local file
-    pub fn local(path: PathBuf) -> Self {
-        Self::Local(path)
-    }
-
-    /// Check if the file exists locally (if it is a local file or if it has been downloaded)
-    pub fn downloaded(&self) -> bool {
-        let cache = Cache::default();
-        cache.exists(self)
-    }
-}
-
 /// Wrap a closure in a release pool if the metal feature is enabled
 pub fn maybe_autoreleasepool<T>(f: impl FnOnce() -> T) -> T {
     #[cfg(feature = "metal")]
@@ -101,9 +51,6 @@ pub fn maybe_autoreleasepool<T>(f: impl FnOnce() -> T) -> T {
         f()
     }
 }
-
-/// A future that is boxed and pinned.
-pub type BoxedFuture<'a, T> = Pin<Box<dyn Future<Output = T> + Send + 'a>>;
 
 /// Clear a `Vec<T>` and copy the contents of a tensor into it.
 pub fn copy_tensor_into_vec<T: WithDType>(
@@ -131,4 +78,22 @@ pub fn copy_tensor_into_vec<T: WithDType>(
         Storage::Cuda(storage) => from_cpu_storage(&storage.to_cpu_storage()?, layout),
         Storage::Metal(storage) => from_cpu_storage(&storage.to_cpu_storage()?, layout),
     }
+}
+
+fn cuda_compatible_dequantize_f16(qtensor: &QTensor) -> candle_core::Result<Tensor> {
+    let device = qtensor.device();
+    qtensor
+        .dequantize(&device)?
+        .to_dtype(candle_core::DType::F16)?
+        .to_device(&device)
+}
+
+/// Convert a QTensor to a QMatMul
+pub fn qmatmul_from_qtensor(qtensor: impl Into<Arc<QTensor>>) -> candle_core::Result<QMatMul> {
+    let qtensor = qtensor.into();
+    Ok(match qtensor.dtype() {
+        GgmlDType::F32 => QMatMul::Tensor(qtensor.dequantize(&qtensor.device())?),
+        GgmlDType::F16 => QMatMul::TensorF16(cuda_compatible_dequantize_f16(&qtensor)?),
+        _ => QMatMul::QTensor(qtensor),
+    })
 }

@@ -1,7 +1,11 @@
+#[cfg(feature = "sample")]
 use std::hash::Hash;
+#[cfg(feature = "sample")]
 use std::hash::Hasher;
 
+#[cfg(feature = "sample")]
 use llm_samplers::configure::SamplerChainBuilder;
+#[cfg(feature = "sample")]
 use llm_samplers::prelude::*;
 
 /// Parameters to use when generating text.
@@ -13,11 +17,12 @@ pub struct GenerationParameters {
     pub(crate) mu: f32,
     pub(crate) top_p: f64,
     pub(crate) top_k: u32,
-    pub(crate) repetition_penalty: f32,
+    pub(crate) repetition_penalty: Option<f32>,
     pub(crate) repetition_penalty_range: u32,
     pub(crate) max_length: u32,
     pub(crate) stop_on: Option<String>,
     pub(crate) seed: Option<u64>,
+    #[cfg(feature = "sample")]
     sampler: Option<(u64, SamplerChain)>,
 }
 
@@ -48,8 +53,9 @@ impl Clone for GenerationParameters {
             repetition_penalty_range: self.repetition_penalty_range,
             max_length: self.max_length,
             stop_on: self.stop_on.clone(),
-            sampler: None,
             seed: None,
+            #[cfg(feature = "sample")]
+            sampler: None,
         }
     }
 }
@@ -60,6 +66,7 @@ impl Default for GenerationParameters {
     }
 }
 
+#[cfg(feature = "sample")]
 impl Sampler for GenerationParameters {
     fn sample<'a>(
         &mut self,
@@ -92,20 +99,24 @@ impl GenerationParameters {
             mu: 10.,
             top_p: 1.0,
             top_k: 1,
-            repetition_penalty: 1.3,
+            repetition_penalty: None,
             repetition_penalty_range: 64,
             max_length: u32::MAX,
             stop_on: None,
-            sampler: None,
             seed: None,
+            #[cfg(feature = "sample")]
+            sampler: None,
         }
     }
 
+    #[cfg(feature = "sample")]
     fn with_sampler<O>(&mut self, with_sampler: impl FnOnce(&mut SamplerChain) -> O) -> O {
         let mut hash = std::collections::hash_map::DefaultHasher::new();
         self.eta.to_le_bytes().hash(&mut hash);
         self.mu.to_le_bytes().hash(&mut hash);
-        self.repetition_penalty.to_le_bytes().hash(&mut hash);
+        self.repetition_penalty
+            .map(|f| f.to_le_bytes())
+            .hash(&mut hash);
         self.repetition_penalty_range.hash(&mut hash);
         self.tau.to_le_bytes().hash(&mut hash);
         self.top_p.to_le_bytes().hash(&mut hash);
@@ -123,6 +134,7 @@ impl GenerationParameters {
         output
     }
 
+    #[cfg(feature = "sample")]
     /// Create a sampler chain from the generation parameters.
     pub fn sampler(&self) -> SamplerChain {
         use llm_samplers::configure::SamplerSlot;
@@ -131,7 +143,6 @@ impl GenerationParameters {
             tau,
             eta,
             mu,
-            repetition_penalty,
             repetition_penalty_range,
             top_p: _,
             max_length: _,
@@ -142,7 +153,7 @@ impl GenerationParameters {
         let tau = *tau;
         let eta = *eta;
         let mu = *mu;
-        let repetition_penalty = *repetition_penalty;
+        let repetition_penalty = self.repetition_penalty();
         let repetition_penalty_range = *repetition_penalty_range;
         SamplerChainBuilder::from([
             (
@@ -191,6 +202,7 @@ impl GenerationParameters {
         self
     }
 
+    #[cfg(feature = "sample")]
     /// Get the mirostat2 sampler from the generation parameters.
     pub fn mirostat2_sampler(self) -> SampleMirostat2 {
         SampleMirostat2::default()
@@ -199,15 +211,16 @@ impl GenerationParameters {
             .mu(self.mu)
     }
 
+    #[cfg(feature = "sample")]
     /// Create a sampler chain from the generation parameters without removing any tokens. This can be useful in combination with [`ModelExt::stream_structured_text_with_sampler`] which may pick unlikely tokens.
     pub fn bias_only_sampler(self) -> SamplerChain {
         use llm_samplers::configure::SamplerSlot;
         let GenerationParameters {
             temperature,
-            repetition_penalty,
             repetition_penalty_range,
             ..
         } = self;
+        let repetition_penalty = self.repetition_penalty();
         SamplerChainBuilder::from([
             (
                 "repetition",
@@ -263,7 +276,7 @@ impl GenerationParameters {
 
     /// Set the repetition penalty to use when generating text.
     pub fn with_repetition_penalty(mut self, repetition_penalty: f32) -> Self {
-        self.repetition_penalty = repetition_penalty;
+        self.repetition_penalty = Some(repetition_penalty);
         self
     }
 
@@ -313,7 +326,7 @@ impl GenerationParameters {
 
     /// Get the repetition penalty to use when generating text.
     pub fn repetition_penalty(&self) -> f32 {
-        self.repetition_penalty
+        self.repetition_penalty.unwrap_or(1.3)
     }
 
     /// Get the repetition penalty range to use when generating text.

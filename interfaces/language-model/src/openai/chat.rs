@@ -1,10 +1,10 @@
 use super::{NoOpenAIAPIKeyError, OpenAICompatibleClient};
 use crate::{
-    ChatModel, ChatSession, CreateChatSession, CreateDefaultChatConstraintsForType,
+    ChatModel, ChatSession, ContentChunk, CreateChatSession, CreateDefaultChatConstraintsForType,
     GenerationParameters, ModelBuilder, ModelConstraints, StructuredChatModel,
 };
 use futures_util::StreamExt;
-use kalosm_common::ModelLoadingProgress;
+use kalosm_model_types::ModelLoadingProgress;
 use kalosm_sample::Schema;
 use reqwest_eventsource::{Event, RequestBuilderExt};
 use serde::{de::DeserializeOwned, Deserialize, Serialize};
@@ -222,16 +222,26 @@ impl ChatModel<GenerationParameters> for OpenAICompatibleChatModel {
         mut on_token: impl FnMut(String) -> Result<(), Self::Error> + Send + Sync + 'static,
     ) -> impl Future<Output = Result<(), Self::Error>> + Send + 'a {
         let myself = &*self.inner;
-        let json = serde_json::json!({
+        let messages = format_messages(messages);
+        let mut json = serde_json::json!({
             "messages": messages,
             "model": myself.model,
             "stream": true,
             "top_p": sampler.top_p,
             "temperature": sampler.temperature,
-            "frequency_penalty": sampler.repetition_penalty,
-            "max_completion_tokens": if sampler.max_length == u32::MAX { None } else { Some(sampler.max_length) },
-            "stop": sampler.stop_on.clone(),
         });
+        if let Some(repetition_penalty) = sampler.repetition_penalty {
+            json["frequency_penalty"] = serde_json::json!(repetition_penalty);
+        }
+        if sampler.max_length != u32::MAX {
+            json["max_completion_tokens"] = serde_json::json!(sampler.max_length);
+        }
+        if let Some(seed) = sampler.seed() {
+            json["seed"] = serde_json::json!(seed);
+        }
+        if let Some(stop) = &sampler.stop_on {
+            json["stop"] = serde_json::json!(stop);
+        }
         async move {
             let api_key = myself.client.resolve_api_key()?;
             let mut event_source = myself
@@ -239,7 +249,7 @@ impl ChatModel<GenerationParameters> for OpenAICompatibleChatModel {
                 .reqwest_client
                 .post(format!("{}/chat/completions", myself.client.base_url()))
                 .header("Content-Type", "application/json")
-                .header("Authorization", format!("Bearer {}", api_key))
+                .header("Authorization", format!("Bearer {api_key}"))
                 .json(&json)
                 .eventsource()
                 .unwrap();
@@ -392,25 +402,37 @@ where
         }
 
         let myself = &*self.inner;
-        let json = schema.map(|schema| serde_json::json!({
-            "messages": messages,
-            "model": myself.model,
-            "stream": true,
-            "top_p": sampler.top_p,
-            "temperature": sampler.temperature,
-            "frequency_penalty": sampler.repetition_penalty,
-            "max_completion_tokens": if sampler.max_length == u32::MAX { None } else { Some(sampler.max_length) },
-            "stop": sampler.stop_on.clone(),
-            "seed": sampler.seed(),
-            "response_format": {
-                "type": "json_schema",
-                "json_schema": {
-                    "name": "response",
-                    "schema": schema,
-                    "strict": true
+        let json = schema.map(|schema| {
+            let messages = format_messages(messages);
+            let mut json = serde_json::json!({
+                "messages": messages,
+                "model": myself.model,
+                "stream": true,
+                "top_p": sampler.top_p,
+                "temperature": sampler.temperature,
+                "response_format": {
+                    "type": "json_schema",
+                    "json_schema": {
+                        "name": "response",
+                        "schema": schema,
+                        "strict": true
+                    }
                 }
+            });
+            if let Some(repetition_penalty) = sampler.repetition_penalty {
+                json["frequency_penalty"] = serde_json::json!(repetition_penalty);
             }
-        }));
+            if sampler.max_length != u32::MAX {
+                json["max_completion_tokens"] = serde_json::json!(sampler.max_length);
+            }
+            if let Some(stop) = &sampler.stop_on {
+                json["stop"] = serde_json::json!(stop);
+            }
+            if let Some(seed) = sampler.seed() {
+                json["seed"] = serde_json::json!(seed);
+            }
+            json
+        });
         async move {
             let json = json?;
             let api_key = myself.client.resolve_api_key()?;
@@ -419,7 +441,7 @@ where
                 .reqwest_client
                 .post(format!("{}/chat/completions", myself.client.base_url()))
                 .header("Content-Type", "application/json")
-                .header("Authorization", format!("Bearer {}", api_key))
+                .header("Authorization", format!("Bearer {api_key}"))
                 .json(&json)
                 .eventsource()
                 .unwrap();
@@ -431,7 +453,13 @@ where
                     Event::Open => {}
                     Event::Message(message) => {
                         let data =
-                            serde_json::from_str::<OpenAICompatibleChatResponse>(&message.data)?;
+                            serde_json::from_str::<OpenAICompatibleChatResponse>(&message.data)
+                                .inspect_err(|err| {
+                                    tracing::error!(
+                                        "Failed to parse streaming response: {:?}\nerror: {err:?}",
+                                        message.data
+                                    )
+                                })?;
                         let first_choice = data
                             .choices
                             .first()
@@ -462,7 +490,12 @@ where
                 }
             }
 
-            let result = serde_json::from_str::<P>(&new_message_text)?;
+            let result = serde_json::from_str::<P>(&new_message_text).map_err(|err| {
+                tracing::error!(
+                    "Failed to parse structured response: {new_message_text:?}\nerror: {err:?}"
+                );
+                OpenAICompatibleChatModelError::DeserializeError(err)
+            })?;
 
             let new_message =
                 crate::ChatMessage::new(crate::MessageType::UserMessage, new_message_text);
@@ -474,11 +507,53 @@ where
     }
 }
 
+fn format_messages(messages: &[crate::ChatMessage]) -> serde_json::Value {
+    messages
+        .iter()
+        .map(|m| {
+            let content = m.content();
+            let content: serde_json::Value = if let Some(string) = content.as_str() {
+                string.into()
+            } else {
+                content
+                    .chunks()
+                    .iter()
+                    .map(|chunk| match chunk {
+                        ContentChunk::Text(text) => {
+                            serde_json::json!({
+                                "type": "text",
+                                "text": text
+                            })
+                        }
+                        ContentChunk::Media(image) => {
+                            serde_json::json!({
+                                "type": "image_url",
+                                "image_url": {
+                                    "url": image.as_url()
+                                }
+                            })
+                        }
+                    })
+                    .collect::<Vec<_>>()
+                    .into()
+            };
+
+            serde_json::json!({
+                "role": m.role(),
+                "content": content,
+            })
+        })
+        .collect::<Vec<_>>()
+        .into()
+}
+
 #[cfg(test)]
 mod tests {
     use std::sync::{Arc, RwLock};
 
     use serde::Deserialize;
+
+    use crate::{ChatModelExt, OpenAICompatibleChatModel};
 
     use super::{
         ChatModel, CreateChatSession, GenerationParameters, OpenAICompatibleChatModelBuilder,
@@ -495,7 +570,12 @@ mod tests {
 
         let messages = vec![crate::ChatMessage::new(
             crate::MessageType::UserMessage,
-            "Hello, world!".to_string(),
+            (
+                crate::MediaSource::url(
+                    "https://qianwen-res.oss-cn-beijing.aliyuncs.com/Qwen-VL/assets/demo.jpeg",
+                ),
+                "Describe this image like a pirate.".to_string(),
+            ),
         )];
         let all_text = Arc::new(RwLock::new(String::new()));
         model
@@ -569,5 +649,209 @@ mod tests {
         assert!(!all_text.is_empty());
 
         assert!(!response.primes.is_empty());
+    }
+
+    #[tokio::test]
+    async fn test_gpt_4o_mini_constrained_with_option() {
+        use kalosm_sample::Schema;
+
+        let model = OpenAICompatibleChatModelBuilder::new()
+            .with_gpt_4o_mini()
+            .build();
+
+        let mut session = model.new_chat_session().unwrap();
+
+        #[derive(Debug, Clone, kalosm_sample::Parse, kalosm_sample::Schema, Deserialize)]
+        struct Constraints {
+            name: Option<String>,
+        }
+
+        println!("schema: {}", Constraints::schema());
+
+        {
+            let all_text = Arc::new(RwLock::new(String::new()));
+            let messages = vec![crate::ChatMessage::new(
+            crate::MessageType::UserMessage,
+            "What name, if any does this sentence contain: Evan is one of the developers of Kalosm".to_string(),
+        )];
+
+            let response: Constraints = model
+                .add_message_with_callback_and_constraints(
+                    &mut session,
+                    &messages,
+                    GenerationParameters::default(),
+                    SchemaParser::new(),
+                    {
+                        let all_text = all_text.clone();
+                        move |token| {
+                            let mut all_text = all_text.write().unwrap();
+                            all_text.push_str(&token);
+                            print!("{token}");
+                            std::io::Write::flush(&mut std::io::stdout()).unwrap();
+                            Ok(())
+                        }
+                    },
+                )
+                .await
+                .unwrap();
+            println!("{response:?}");
+
+            let all_text = all_text.read().unwrap();
+            println!("{all_text}");
+
+            assert!(!all_text.is_empty());
+
+            assert!(response.name.is_some());
+        }
+        {
+            let all_text = Arc::new(RwLock::new(String::new()));
+            let messages = vec![crate::ChatMessage::new(
+                crate::MessageType::UserMessage,
+                "What name, if any does this sentence contain: The earth is round".to_string(),
+            )];
+
+            let response: Constraints = model
+                .add_message_with_callback_and_constraints(
+                    &mut session,
+                    &messages,
+                    GenerationParameters::default(),
+                    SchemaParser::new(),
+                    {
+                        let all_text = all_text.clone();
+                        move |token| {
+                            let mut all_text = all_text.write().unwrap();
+                            all_text.push_str(&token);
+                            print!("{token}");
+                            std::io::Write::flush(&mut std::io::stdout()).unwrap();
+                            Ok(())
+                        }
+                    },
+                )
+                .await
+                .unwrap();
+            println!("{response:?}");
+
+            let all_text = all_text.read().unwrap();
+            println!("{all_text}");
+
+            assert!(!all_text.is_empty());
+
+            assert!(response.name.is_none());
+        }
+    }
+
+    #[tokio::test]
+    async fn test_gpt_4o_mini_constrained_with_unit_enum() {
+        use kalosm_sample::Schema;
+
+        let model = OpenAICompatibleChatModelBuilder::new()
+            .with_gpt_4o_mini()
+            .build();
+
+        let mut session = model.new_chat_session().unwrap();
+
+        #[derive(Debug, Clone, kalosm_sample::Parse, kalosm_sample::Schema, Deserialize)]
+        struct Constraints {
+            contains_name: ContainsName,
+        }
+
+        #[derive(Debug, Clone, kalosm_sample::Parse, kalosm_sample::Schema, Deserialize)]
+        enum ContainsName {
+            Yes,
+            No,
+        }
+
+        println!("schema: {}", Constraints::schema());
+
+        {
+            let all_text = Arc::new(RwLock::new(String::new()));
+            let messages = vec![crate::ChatMessage::new(
+                crate::MessageType::UserMessage,
+                "Does this sentence contain a name: Evan is one of the developers of Kalosm"
+                    .to_string(),
+            )];
+
+            let response: Constraints = model
+                .add_message_with_callback_and_constraints(
+                    &mut session,
+                    &messages,
+                    GenerationParameters::default(),
+                    SchemaParser::new(),
+                    {
+                        let all_text = all_text.clone();
+                        move |token| {
+                            let mut all_text = all_text.write().unwrap();
+                            all_text.push_str(&token);
+                            print!("{token}");
+                            std::io::Write::flush(&mut std::io::stdout()).unwrap();
+                            Ok(())
+                        }
+                    },
+                )
+                .await
+                .unwrap();
+            println!("{response:?}");
+
+            let all_text = all_text.read().unwrap();
+            println!("{all_text}");
+
+            assert!(!all_text.is_empty());
+
+            assert!(matches!(response.contains_name, ContainsName::Yes));
+        }
+        {
+            let all_text = Arc::new(RwLock::new(String::new()));
+            let messages = vec![crate::ChatMessage::new(
+                crate::MessageType::UserMessage,
+                "Does this sentence contain a name: The earth is round".to_string(),
+            )];
+
+            let response: Constraints = model
+                .add_message_with_callback_and_constraints(
+                    &mut session,
+                    &messages,
+                    GenerationParameters::default(),
+                    SchemaParser::new(),
+                    {
+                        let all_text = all_text.clone();
+                        move |token| {
+                            let mut all_text = all_text.write().unwrap();
+                            all_text.push_str(&token);
+                            print!("{token}");
+                            std::io::Write::flush(&mut std::io::stdout()).unwrap();
+                            Ok(())
+                        }
+                    },
+                )
+                .await
+                .unwrap();
+            println!("{response:?}");
+
+            let all_text = all_text.read().unwrap();
+            println!("{all_text}");
+
+            assert!(!all_text.is_empty());
+
+            assert!(matches!(response.contains_name, ContainsName::No));
+        }
+    }
+
+    #[tokio::test]
+    async fn test_gemini_flash() {
+        let llm = OpenAICompatibleChatModel::builder()
+            .with_model("gemini-2.0-flash")
+            .with_client(
+                crate::OpenAICompatibleClient::new()
+                    .with_base_url("https://generativelanguage.googleapis.com/v1beta/openai")
+                    .with_api_key(std::env::var("GEMINI_API_KEY").unwrap()),
+            )
+            .build();
+        let mut generate_character = llm.chat();
+        let res = generate_character(
+            &"Candice is the CEO of a fortune 500 company. She is 30 years old.",
+        )
+        .await
+        .unwrap();
+        println!("{res}");
     }
 }

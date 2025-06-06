@@ -1,5 +1,5 @@
-use kalosm_common::ModelLoadingProgress;
 use kalosm_llama::*;
+use kalosm_model_types::ModelLoadingProgress;
 use prelude::StreamExt;
 use prelude::TextCompletionModelExt;
 
@@ -21,7 +21,7 @@ async fn main() {
             let start_time = std::time::Instant::now();
             let _ = model.complete(prompt).next().await.unwrap();
             let elapsed = start_time.elapsed();
-            println!("\n\nLoaded {} tokens in {:?}", tokens, elapsed);
+            println!("\n\nLoaded {tokens} tokens in {elapsed:?}");
             println!(
                 "Tokens per second: {:.2}",
                 tokens as f64 / elapsed.as_secs_f64()
@@ -47,7 +47,7 @@ async fn main() {
             let start_time = std::time::Instant::now();
             let _ = model.complete(&prompt).next().await.unwrap();
             let elapsed = start_time.elapsed();
-            println!("\n\nLoaded {} tokens in {:?}", tokens, elapsed);
+            println!("\n\nLoaded {tokens} tokens in {elapsed:?}");
             println!(
                 "Tokens per second: {:.2}",
                 tokens as f64 / elapsed.as_secs_f64()
@@ -72,7 +72,7 @@ async fn main() {
                 tokens += 1;
             }
             let elapsed = start_time.elapsed();
-            println!("\n\nGenerated {} tokens in {:?}", tokens, elapsed);
+            println!("\n\nGenerated {tokens} tokens in {elapsed:?}");
             println!(
                 "Tokens per second: {:.2}",
                 tokens as f64 / elapsed.as_secs_f64()

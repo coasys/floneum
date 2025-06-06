@@ -48,12 +48,11 @@ extern crate intel_mkl_src;
 #[cfg(feature = "accelerate")]
 extern crate accelerate_src;
 
-use kalosm_common::*;
-
-use std::sync::{Arc, RwLock};
-
 use candle_core::{Device, IndexOp, Tensor};
 use candle_nn::VarBuilder;
+use kalosm_common::*;
+use kalosm_model_types::ModelLoadingProgress;
+use std::sync::{Arc, RwLock};
 use tokenizers::{Encoding, PaddingParams, Tokenizer};
 
 mod language_model;
@@ -253,21 +252,21 @@ impl Bert {
             search_embedding_prefix,
         } = source;
 
-        let source = format!("Config ({})", config);
+        let source = format!("Config ({config})");
         let mut create_progress = ModelLoadingProgress::downloading_progress(source);
         let config_filename = cache
             .get(&config, |progress| {
                 progress_handler(create_progress(progress))
             })
             .await?;
-        let tokenizer_source = format!("Tokenizer ({})", tokenizer);
+        let tokenizer_source = format!("Tokenizer ({tokenizer})");
         let mut create_progress = ModelLoadingProgress::downloading_progress(tokenizer_source);
         let tokenizer_filename = cache
             .get(&tokenizer, |progress| {
                 progress_handler(create_progress(progress))
             })
             .await?;
-        let model_source = format!("Model ({})", model);
+        let model_source = format!("Model ({model})");
         let mut create_progress = ModelLoadingProgress::downloading_progress(model_source);
         let weights_filename = cache
             .get(&model, |progress| {

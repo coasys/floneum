@@ -1,6 +1,9 @@
 use std::path::PathBuf;
 
-use kalosm_common::{CacheError, FileLoadingProgress, FileSource};
+use kalosm_common::CacheError;
+use kalosm_model_types::{FileLoadingProgress, FileSource};
+
+use crate::raw::RopeScalingConfig;
 
 fn llama_tokenizer() -> FileSource {
     FileSource::huggingface(
@@ -34,14 +37,22 @@ fn qwen_tokenizer() -> FileSource {
     )
 }
 
+#[derive(Debug, serde::Deserialize)]
+pub(crate) struct LlamaConfigJson {
+    pub(crate) rope_scaling: Option<RopeScalingConfig>,
+}
+
 /// A source for the Llama model.
 #[derive(Clone, Debug)]
 pub struct LlamaSource {
-    pub(crate) model: FileSource,
+    pub(crate) model: Vec<FileSource>,
+    pub(crate) vision_model: Option<FileSource>,
     pub(crate) tokenizer: Option<FileSource>,
+    pub(crate) config: Option<FileSource>,
     pub(crate) group_query_attention: u8,
     pub(crate) cache: kalosm_common::Cache,
     pub(crate) override_stop_token_string: Option<String>,
+    pub(crate) override_chat_template: Option<String>,
 }
 
 /// Errors that can occur when loading the Llama model.
@@ -51,6 +62,9 @@ pub enum LlamaSourceError {
     /// An error occurred while loading the tokenizer.
     #[error("Failed to load the tokenizer: {0}")]
     Tokenizer(Box<dyn std::error::Error + Send + Sync>),
+    /// An error occurred while loading the config.
+    #[error("Failed to load the config: {0}")]
+    Config(#[from] serde_json::Error),
     /// An error occurred while loading the model (from the cache or downloading it).
     #[error("Failed to load the model: {0}")]
     Model(#[from] CacheError),
@@ -75,23 +89,46 @@ impl LlamaSource {
     /// Create a new source for the Llama model.
     pub fn new(model: FileSource) -> Self {
         Self {
-            model,
+            model: vec![model],
             tokenizer: None,
+            config: None,
             group_query_attention: 1,
             cache: Default::default(),
             override_stop_token_string: None,
+            override_chat_template: None,
+            vision_model: None,
+        }
+    }
+
+    /// Create a new source for the Llama model with multiple files.
+    pub fn new_sharded(model: Vec<FileSource>) -> Self {
+        Self {
+            model,
+            tokenizer: None,
+            config: None,
+            group_query_attention: 1,
+            cache: Default::default(),
+            override_stop_token_string: None,
+            override_chat_template: None,
+            vision_model: None,
         }
     }
 
     /// Set the model to use for the model
-    pub fn with_model(mut self, model: FileSource) -> Self {
-        self.model = model;
+    pub fn with_model(mut self, model: impl Into<Vec<FileSource>>) -> Self {
+        self.model = model.into();
         self
     }
 
     /// Set the tokenizer to use for the model. Kalosm will try to load the tokenizer from the gguf file if no tokenizer is provided.
     pub fn with_tokenizer(mut self, tokenizer: FileSource) -> Self {
         self.tokenizer = Some(tokenizer);
+        self
+    }
+
+    /// Set the config to use for the model. Kalosm will try to load the config from the gguf file if no config is provided.
+    pub fn with_config(mut self, config: FileSource) -> Self {
+        self.config = Some(config);
         self
     }
 
@@ -114,18 +151,35 @@ impl LlamaSource {
     }
 
     /// Override the stop token string. This is useful for models that have the wrong default stop token string.
-    pub fn with_override_stop_token_string(mut self, stop_token_string: String) -> Self {
-        self.override_stop_token_string = Some(stop_token_string);
+    pub fn with_override_stop_token_string(mut self, stop_token_string: impl ToString) -> Self {
+        self.override_stop_token_string = Some(stop_token_string.to_string());
+
+        self
+    }
+
+    /// Override the chat template. This is useful for models that have a missing or incorrect chat template.
+    pub fn with_override_chat_template(mut self, chat_template: impl ToString) -> Self {
+        self.override_chat_template = Some(chat_template.to_string());
+
+        self
+    }
+
+    /// Set the clip model to use for vision encoding. This is used for Qwen-2.5 VL models to enable vision.
+    pub fn with_vision_model(mut self, model: FileSource) -> Self {
+        self.vision_model = Some(model);
 
         self
     }
 
     pub(crate) async fn model(
         &self,
-        progress: impl FnMut(FileLoadingProgress),
-    ) -> Result<PathBuf, LlamaSourceError> {
-        let path = self.cache.get(&self.model, progress).await?;
-        Ok(path)
+        mut progress: impl FnMut(FileLoadingProgress),
+    ) -> Result<Vec<PathBuf>, LlamaSourceError> {
+        let mut paths = Vec::new();
+        for file in &self.model {
+            paths.push(self.cache.get(file, &mut progress).await?);
+        }
+        Ok(paths)
     }
 
     /// A preset for Mistral7b
@@ -159,6 +213,25 @@ impl LlamaSource {
         ))
         .with_tokenizer(mistral_tokenizer())
         .with_group_query_attention(8)
+    }
+
+    /// A preset for Codestral 22b
+    pub fn codestral_22b() -> Self {
+        Self::new(
+            FileSource::HuggingFace {
+                model_id: "bartowski/Codestral-22B-v0.1-GGUF".to_string(),
+                revision: "main".to_string(),
+                file: "Codestral-22B-v0.1-Q4_K_M.gguf".to_string(),
+            },
+        )
+        .with_tokenizer(
+            FileSource::HuggingFace {
+                model_id: "mistralai/Codestral-22B-v0.1".to_string(),
+                revision: "main".to_string(),
+                file: "tokenizer.json".to_string(),
+            },
+        )
+        .with_override_chat_template(r#"{%- if messages[0]['role'] == 'system' %}\n    {%- set system_message = messages[0]['content'] %}\n    {%- set loop_messages = messages[1:] %}\n{%- else %}\n    {%- set loop_messages = messages %}\n{%- endif %}\n\n{{- bos_token }}\n{%- for message in loop_messages %}\n    {%- if (message['role'] == 'user') != (loop.index0 % 2 == 0) %}\n        {{- raise_exception('After the optional system message, conversation roles must alternate user/assistant/user/assistant/...') }}\n    {%- endif %}\n    {%- if message['role'] == 'user' %}\n        {%- if loop.last and system_message is defined %}\n            {{- '[INST] ' + system_message + '\\n\\n' + message['content'] + '[/INST]' }}\n        {%- else %}\n            {{- '[INST] ' + message['content'] + '[/INST]' }}\n        {%- endif %}\n    {%- elif message['role'] == 'assistant' %}\n        {{- ' ' + message['content'] + eos_token}}\n    {%- else %}\n        {{- raise_exception('Only user and assistant roles are supported, with the exception of an initial optional system message!') }}\n    {%- endif %}\n{%- endfor %}\n"#)
     }
 
     /// A preset for NeuralHermes-2.5-Mistral-7B-GGUF
@@ -389,6 +462,12 @@ impl LlamaSource {
             "Meta-Llama-3.1-8B-Instruct-Q4_K_M.gguf".to_string(),
         ))
         .with_tokenizer(llama_v3_tokenizer())
+        // https://huggingface.co/unsloth/Meta-Llama-3.1-8B-Instruct/blob/main/config.json
+        .with_config(FileSource::huggingface(
+            "unsloth/Meta-Llama-3.1-8B-Instruct".to_string(),
+            "main".to_string(),
+            "config.json".to_string(),
+        ))
         .with_group_query_attention(1)
     }
 
@@ -422,6 +501,11 @@ impl LlamaSource {
             "Llama-3.2-1B-Instruct-Q4_K_M.gguf".to_string(),
         ))
         .with_tokenizer(llama_v3_tokenizer())
+        .with_config(FileSource::huggingface(
+            "NousResearch/Llama-3.2-1B".to_string(),
+            "main".to_string(),
+            "config.json".to_string(),
+        ))
         .with_group_query_attention(1)
     }
 
@@ -433,6 +517,11 @@ impl LlamaSource {
             "Llama-3.2-3B-Instruct-Q4_K_M.gguf".to_string(),
         ))
         .with_tokenizer(llama_v3_tokenizer())
+        .with_config(FileSource::huggingface(
+            "NousResearch/Hermes-3-Llama-3.2-3B".to_string(),
+            "main".to_string(),
+            "config.json".to_string(),
+        ))
         .with_group_query_attention(1)
     }
 
@@ -629,6 +718,252 @@ impl LlamaSource {
             "main".to_string(),
             "DeepSeek-R1-Distill-Llama-8B-Q4_K_M.gguf".to_string(),
         ))
+    }
+
+    /// A preset for gemma 3 1b instruction fine tuned
+    ///
+    /// Note: The gemma model series does not support system prompts
+    pub fn gemma_3_1b_chat() -> Self {
+        Self::new(FileSource::huggingface(
+            "google/gemma-3-1b-it-qat-q4_0-gguf".to_string(),
+            "main".to_string(),
+            "gemma-3-1b-it-q4_0.gguf".to_string(),
+        ))
+        .with_tokenizer(FileSource::huggingface(
+            "google/gemma-3-1b-it".to_string(),
+            "main".to_string(),
+            "tokenizer.json".to_string(),
+        ))
+        .with_override_stop_token_string("<end_of_turn>")
+    }
+
+    /// A preset for gemma 3 4b instruction fine tuned
+    ///
+    /// Note: The gemma model series does not support system prompts
+    pub fn gemma_3_4b_chat() -> Self {
+        Self::new(FileSource::huggingface(
+            "google/gemma-3-4b-it-qat-q4_0-gguf".to_string(),
+            "main".to_string(),
+            "gemma-3-4b-it-q4_0.gguf".to_string(),
+        ))
+        .with_tokenizer(FileSource::huggingface(
+            "google/gemma-3-4b-it".to_string(),
+            "main".to_string(),
+            "tokenizer.json".to_string(),
+        ))
+        .with_override_stop_token_string("<end_of_turn>")
+    }
+
+    /// A preset for gemma 3 12b instruction fine tuned
+    ///
+    /// Note: The gemma model series does not support system prompts
+    pub fn gemma_3_12b_chat() -> Self {
+        Self::new(FileSource::huggingface(
+            "google/gemma-3-12b-it-qat-q4_0-gguf".to_string(),
+            "main".to_string(),
+            "gemma-3-12b-it-q4_0.gguf".to_string(),
+        ))
+        .with_tokenizer(FileSource::huggingface(
+            "google/gemma-3-12b-it".to_string(),
+            "main".to_string(),
+            "tokenizer.json".to_string(),
+        ))
+        .with_override_stop_token_string("<end_of_turn>")
+    }
+
+    /// A preset for gemma 3 27b instruction fine tuned
+    ///
+    /// Note: The gemma model series does not support system prompts
+    pub fn gemma_3_27b_chat() -> Self {
+        Self::new(FileSource::huggingface(
+            "google/gemma-3-27b-it-qat-q4_0-gguf".to_string(),
+            "main".to_string(),
+            "gemma-3-27b-it-q4_0.gguf".to_string(),
+        ))
+        .with_tokenizer(FileSource::huggingface(
+            "google/gemma-3-27b-it".to_string(),
+            "main".to_string(),
+            "tokenizer.json".to_string(),
+        ))
+        .with_override_stop_token_string("<end_of_turn>")
+    }
+
+    /// A preset for qwen 2.5 3b VL chat in f16 precision
+    pub fn qwen_2_5_3b_vl_chat_f16() -> Self {
+        Self::new(kalosm_model_types::FileSource::HuggingFace {
+            model_id: "ggml-org/Qwen2.5-VL-3B-Instruct-GGUF".into(),
+            revision: "main".into(),
+            file: "Qwen2.5-VL-3B-Instruct-f16.gguf".into(),
+        })
+        .with_vision_model(kalosm_model_types::FileSource::HuggingFace {
+            model_id: "ggml-org/Qwen2.5-VL-3B-Instruct-GGUF".into(),
+            revision: "main".into(),
+            file: "mmproj-Qwen2.5-VL-3B-Instruct-f16.gguf".into(),
+        })
+        .with_tokenizer(kalosm_model_types::FileSource::HuggingFace {
+            model_id: "Qwen/Qwen2.5-VL-3B-Instruct".into(),
+            revision: "main".into(),
+            file: "tokenizer.json".into(),
+        })
+    }
+
+    /// A preset for qwen 2.5 3b VL chat in q4 precision
+    pub fn qwen_2_5_3b_vl_chat_q4() -> Self {
+        Self::new(kalosm_model_types::FileSource::HuggingFace {
+            model_id: "ggml-org/Qwen2.5-VL-3B-Instruct-GGUF".into(),
+            revision: "main".into(),
+            file: "Qwen2.5-VL-3B-Instruct-Q4_K_M.gguf".into(),
+        })
+        .with_vision_model(kalosm_model_types::FileSource::HuggingFace {
+            model_id: "ggml-org/Qwen2.5-VL-3B-Instruct-GGUF".into(),
+            revision: "main".into(),
+            file: "mmproj-Qwen2.5-VL-3B-Instruct-f16.gguf".into(),
+        })
+        .with_tokenizer(kalosm_model_types::FileSource::HuggingFace {
+            model_id: "Qwen/Qwen2.5-VL-3B-Instruct".into(),
+            revision: "main".into(),
+            file: "tokenizer.json".into(),
+        })
+    }
+
+    /// A preset for qwen 2.5 3b VL chat in q8 precision
+    pub fn qwen_2_5_3b_vl_chat_q8() -> Self {
+        Self::new(kalosm_model_types::FileSource::HuggingFace {
+            model_id: "ggml-org/Qwen2.5-VL-3B-Instruct-GGUF".into(),
+            revision: "main".into(),
+            file: "Qwen2.5-VL-3B-Instruct-Q8_0.gguf".into(),
+        })
+        .with_vision_model(kalosm_model_types::FileSource::HuggingFace {
+            model_id: "ggml-org/Qwen2.5-VL-3B-Instruct-GGUF".into(),
+            revision: "main".into(),
+            file: "mmproj-Qwen2.5-VL-3B-Instruct-f16.gguf".into(),
+        })
+        .with_tokenizer(kalosm_model_types::FileSource::HuggingFace {
+            model_id: "Qwen/Qwen2.5-VL-3B-Instruct".into(),
+            revision: "main".into(),
+            file: "tokenizer.json".into(),
+        })
+    }
+
+    /// A preset for qwen 2.5 7b VL chat in f16 precision
+    pub fn qwen_2_5_7b_vl_chat_f16() -> Self {
+        Self::new(kalosm_model_types::FileSource::HuggingFace {
+            model_id: "ggml-org/Qwen2.5-VL-7B-Instruct-GGUF".into(),
+            revision: "main".into(),
+            file: "Qwen2.5-VL-7B-Instruct-f16.gguf".into(),
+        })
+        .with_vision_model(kalosm_model_types::FileSource::HuggingFace {
+            model_id: "ggml-org/Qwen2.5-VL-7B-Instruct-GGUF".into(),
+            revision: "main".into(),
+            file: "mmproj-Qwen2.5-VL-7B-Instruct-f16.gguf".into(),
+        })
+        .with_tokenizer(kalosm_model_types::FileSource::HuggingFace {
+            model_id: "Qwen/Qwen2.5-VL-7B-Instruct".into(),
+            revision: "main".into(),
+            file: "tokenizer.json".into(),
+        })
+    }
+
+    /// A preset for qwen 2.5 7b VL chat in q4 precision
+    pub fn qwen_2_5_7b_vl_chat_q4() -> Self {
+        Self::new(kalosm_model_types::FileSource::HuggingFace {
+            model_id: "ggml-org/Qwen2.5-VL-7B-Instruct-GGUF".into(),
+            revision: "main".into(),
+            file: "Qwen2.5-VL-7B-Instruct-Q4_K_M.gguf".into(),
+        })
+        .with_vision_model(kalosm_model_types::FileSource::HuggingFace {
+            model_id: "ggml-org/Qwen2.5-VL-7B-Instruct-GGUF".into(),
+            revision: "main".into(),
+            file: "mmproj-Qwen2.5-VL-7B-Instruct-f16.gguf".into(),
+        })
+        .with_tokenizer(kalosm_model_types::FileSource::HuggingFace {
+            model_id: "Qwen/Qwen2.5-VL-7B-Instruct".into(),
+            revision: "main".into(),
+            file: "tokenizer.json".into(),
+        })
+    }
+
+    /// A preset for qwen 2.5 7b VL chat in q8 precision
+    pub fn qwen_2_5_7b_vl_chat_q8() -> Self {
+        Self::new(kalosm_model_types::FileSource::HuggingFace {
+            model_id: "ggml-org/Qwen2.5-VL-7B-Instruct-GGUF".into(),
+            revision: "main".into(),
+            file: "Qwen2.5-VL-7B-Instruct-Q8_0.gguf".into(),
+        })
+        .with_vision_model(kalosm_model_types::FileSource::HuggingFace {
+            model_id: "ggml-org/Qwen2.5-VL-7B-Instruct-GGUF".into(),
+            revision: "main".into(),
+            file: "mmproj-Qwen2.5-VL-7B-Instruct-f16.gguf".into(),
+        })
+        .with_tokenizer(kalosm_model_types::FileSource::HuggingFace {
+            model_id: "Qwen/Qwen2.5-VL-7B-Instruct".into(),
+            revision: "main".into(),
+            file: "tokenizer.json".into(),
+        })
+    }
+
+    /// A preset for qwen 2.5 32b VL chat in f4 precision
+    pub fn qwen_2_5_32b_vl_chat_q4() -> Self {
+        Self::new(kalosm_model_types::FileSource::HuggingFace {
+            model_id: "ggml-org/Qwen2.5-VL-32B-Instruct-GGUF".into(),
+            revision: "main".into(),
+            file: "Qwen2.5-VL-32B-Instruct-Q4_K_M.gguf".into(),
+        })
+        .with_vision_model(kalosm_model_types::FileSource::HuggingFace {
+            model_id: "ggml-org/Qwen2.5-VL-32B-Instruct-GGUF".into(),
+            revision: "main".into(),
+            file: "mmproj-Qwen2.5-VL-32B-Instruct-f16.gguf".into(),
+        })
+        .with_tokenizer(kalosm_model_types::FileSource::HuggingFace {
+            model_id: "Qwen/Qwen2.5-VL-32B-Instruct".into(),
+            revision: "main".into(),
+            file: "tokenizer.json".into(),
+        })
+    }
+
+    /// A preset for qwen 2.5 32b VL chat in f8 precision
+    pub fn qwen_2_5_32b_vl_chat_q8() -> Self {
+        Self::new(kalosm_model_types::FileSource::HuggingFace {
+            model_id: "ggml-org/Qwen2.5-VL-32B-Instruct-GGUF".into(),
+            revision: "main".into(),
+            file: "Qwen2.5-VL-32B-Instruct-Q8_0.gguf".into(),
+        })
+        .with_vision_model(kalosm_model_types::FileSource::HuggingFace {
+            model_id: "ggml-org/Qwen2.5-VL-32B-Instruct-GGUF".into(),
+            revision: "main".into(),
+            file: "mmproj-Qwen2.5-VL-32B-Instruct-f16.gguf".into(),
+        })
+        .with_tokenizer(kalosm_model_types::FileSource::HuggingFace {
+            model_id: "Qwen/Qwen2.5-VL-32B-Instruct".into(),
+            revision: "main".into(),
+            file: "tokenizer.json".into(),
+        })
+    }
+
+    /// A preset for qwen 2.5 32b VL chat in f16 precision
+    pub fn qwen_2_5_32b_vl_chat_f16() -> Self {
+        Self::new_sharded(vec![
+            kalosm_model_types::FileSource::HuggingFace {
+                model_id: "ggml-org/Qwen2.5-VL-32B-Instruct-GGUF".into(),
+                revision: "main".into(),
+                file: "Qwen2.5-VL-32B-Instruct-f16-00001-of-00002.gguf".into(),
+            },
+            kalosm_model_types::FileSource::HuggingFace {
+                model_id: "ggml-org/Qwen2.5-VL-32B-Instruct-GGUF".into(),
+                revision: "main".into(),
+                file: "Qwen2.5-VL-32B-Instruct-f16-00002-of-00002.gguf".into(),
+            },
+        ])
+        .with_vision_model(kalosm_model_types::FileSource::HuggingFace {
+            model_id: "ggml-org/Qwen2.5-VL-32B-Instruct-GGUF".into(),
+            revision: "main".into(),
+            file: "mmproj-Qwen2.5-VL-32B-Instruct-f16.gguf".into(),
+        })
+        .with_tokenizer(kalosm_model_types::FileSource::HuggingFace {
+            model_id: "Qwen/Qwen2.5-VL-32B-Instruct".into(),
+            revision: "main".into(),
+            file: "tokenizer.json".into(),
+        })
     }
 }
 

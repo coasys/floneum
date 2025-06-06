@@ -15,12 +15,9 @@ pub enum EmbeddedIndexedTableError {
     /// An error from the arroy crate.
     #[error("Arroy error: {0}")]
     Arroy(#[from] arroy::Error),
-    /// An error from the Candle crate.
-    #[error("Candle error: {0}")]
-    Candle(#[from] candle_core::Error),
     /// An error from the SurrealDB crate.
     #[error("SurrealDB error: {0}")]
-    Surreal(#[from] surrealdb::Error),
+    Surreal(#[from] Box<surrealdb::Error>),
     /// An error from querying a record that does not exist.
     #[error("Record not found")]
     RecordNotFound,
@@ -39,9 +36,14 @@ impl From<VectorDbError> for EmbeddedIndexedTableError {
     fn from(value: VectorDbError) -> Self {
         match value {
             VectorDbError::Arroy(err) => Self::Arroy(err),
-            VectorDbError::Candle(err) => Self::Candle(err),
             VectorDbError::EmbeddingNotFound(id) => Self::EmbeddingNotFound(id),
         }
+    }
+}
+
+impl From<surrealdb::Error> for EmbeddedIndexedTableError {
+    fn from(value: surrealdb::Error) -> Self {
+        Self::Surreal(Box::new(value))
     }
 }
 

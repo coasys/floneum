@@ -14,6 +14,9 @@ on:
       - floneum/*/src/**
       - floneum/*/examples/**
       - floneum/*/Cargo.toml
+      - fusor-ml/*/src/**
+      - fusor-ml/*/examples/**
+      - fusor-ml/*/Cargo.toml
       - src/**
       - .github/**
       - Cargo.toml
@@ -32,6 +35,9 @@ on:
       - floneum/*/src/**
       - floneum/*/examples/**
       - floneum/*/Cargo.toml
+      - fusor-ml/*/src/**
+      - fusor-ml/*/examples/**
+      - fusor-ml/*/Cargo.toml
       - src/**
       - .github/**
       - Cargo.toml
@@ -46,8 +52,6 @@ jobs:
     if: github.event.pull_request.draft == false
     name: Mac Test Suite
     runs-on: macos-latest
-    environment:
-      name: OPENAI_API_KEY
     steps:
       - uses: dtolnay/rust-toolchain@stable
       - uses: Swatinem/rust-cache@v2
@@ -56,4 +60,5 @@ jobs:
         env:
           OPENAI_API_KEY: ${{ secrets.OPENAI_API_KEY }}
           ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
-        run: cargo test --all --tests --features kalosm/language,kalosm/sound,kalosm/vision,kalosm/metal
+          GEMINI_API_KEY: ${{ secrets.GEMINI_API_KEY }}
+        run: cargo test --all --tests --features kalosm/language,kalosm/sound,kalosm/vision,kalosm/remote,kalosm/scrape,kalosm/metal --exclude fusor-ml-core

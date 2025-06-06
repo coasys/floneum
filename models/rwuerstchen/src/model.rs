@@ -15,6 +15,7 @@ use candle_transformers::models::wuerstchen::prior::WPrior;
 use candle_transformers::models::{stable_diffusion, wuerstchen::diffnext::WDiffNeXt};
 
 use candle_core::{DType, Device, Tensor};
+use futures_channel::mpsc::UnboundedSender;
 use image::ImageBuffer;
 use tokenizers::Tokenizer;
 
@@ -262,7 +263,7 @@ impl WuerstchenInner {
                     noise_pred
                 );
             }
-            ((latents * 42.)? - 1.).map_err(Into::into)
+            (latents * 42.)? - 1.
         }
     }
 
@@ -311,11 +312,7 @@ impl WuerstchenInner {
     }
 
     /// Run inference with the given settings.
-    pub fn run(
-        &self,
-        settings: WuerstchenInferenceSettings,
-        result: tokio::sync::mpsc::UnboundedSender<Image>,
-    ) {
+    pub fn run(&self, settings: WuerstchenInferenceSettings, mut result: UnboundedSender<Image>) {
         // If the channel is closed, we know that the result will never be read so we can stop early.
         macro_rules! return_if_closed {
             () => {
@@ -330,10 +327,10 @@ impl WuerstchenInner {
         let width = settings.width;
 
         if height < 1024 || width < 1024 {
-            println!("Warning: Würstchen was trained on image resolutions between 1024x1024 & 1536x1536. {}x{} is below the minimum resolution. Image quality may be poor.", height, width);
+            println!("Warning: Würstchen was trained on image resolutions between 1024x1024 & 1536x1536. {height}x{width} is below the minimum resolution. Image quality may be poor.");
         }
         if height > 1536 || width > 1536 {
-            println!("Warning: Würstchen was trained on image resolutions between 1024x1024 & 1536x1536. {}x{} is above the maximum resolution. Image quality may be poor.", height, width);
+            println!("Warning: Würstchen was trained on image resolutions between 1024x1024 & 1536x1536. {height}x{width} is above the maximum resolution. Image quality may be poor.");
         }
         let chech_dims = if height % 128 != 0 || width % 128 != 0 {
             Err(candle_core::Error::Msg(
@@ -370,7 +367,7 @@ impl WuerstchenInner {
                 progress: 1.,
                 result: err,
             };
-            if let Err(err) = result.send(image) {
+            if let Err(err) = result.start_send(image) {
                 tracing::error!("Error sending segment: {err}");
             }
             return;
@@ -406,7 +403,7 @@ impl WuerstchenInner {
                 result: image,
             };
 
-            if let Err(err) = result.send(image) {
+            if let Err(err) = result.start_send(image) {
                 tracing::error!("Error sending segment: {err}");
                 break;
             }

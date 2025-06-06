@@ -38,7 +38,6 @@ impl From<Url> for RssFeed {
     }
 }
 
-#[async_trait::async_trait]
 impl IntoDocuments for RssFeed {
     type Error = RssFeedError;
 
@@ -66,7 +65,7 @@ impl RssFeed {
         for item in channel.items().iter().take(top_n) {
             let mut message = String::new();
             if let Some(title) = item.title() {
-                message.push_str(&format!("### {}\n", title));
+                message.push_str(&format!("### {title}\n"));
             }
             let (source_url, content) = if let Some(content) = item.content() {
                 (None, content.to_string())
