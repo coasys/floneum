@@ -34,7 +34,7 @@ kalosm-llama = { workspace = true, optional = true }
 kalosm-streams.workspace = true
 pulldown-cmark = "0.9.3"
 docx-rs = "0.4.7"
-lopdf = { version = "0.35.0", features = ["async"] }
+lopdf = { version = "0.34.0", features = ["async"] }
 convert_case = "0.6.0"
 kalosm-sample = { workspace = true }
 ego-tree = "0.6.2"
