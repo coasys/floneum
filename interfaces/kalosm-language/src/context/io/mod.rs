@@ -1,7 +1,7 @@
 use crate::context::document::Document;
 use crate::context::document::IntoDocument;
 use crate::context::document::IntoDocuments;
-use ::pdf::PdfError;
+//use ::pdf::PdfError;
 use std::path::PathBuf;
 use tokio::task::JoinSet;
 mod docx;
@@ -10,8 +10,8 @@ mod html;
 pub use html::*;
 mod md;
 pub use md::*;
-mod pdf;
-pub use self::pdf::*;
+//mod pdf;
+//pub use self::pdf::*;
 mod txt;
 pub use txt::*;
 
@@ -52,8 +52,8 @@ pub enum TextFileDecodeError {
     #[error("Failed to extract document from text file: {0}")]
     Extract(#[from] ExtractDocumentError),
     /// An error decoding the pdf file
-    #[error("Failed to decode pdf file: {0}")]
-    Pdf(#[from] PdfError),
+    //#[error("Failed to decode pdf file: {0}")]
+    //Pdf(#[from] PdfError),
     /// An error reading the docx file
     #[error("Failed to read docx file: {0}")]
     Docx(#[from] docx_rs::ReaderError),
@@ -85,7 +85,7 @@ pub enum FsDocument {
     /// A markdown document.
     Md(MdDocument),
     /// A pdf document.
-    Pdf(PdfDocument),
+    //Pdf(PdfDocument),
     /// A text document.
     Txt(TextDocument),
 }
@@ -101,7 +101,7 @@ impl TryFrom<PathBuf> for FsDocument {
             Some("docx") => Ok(Self::Docx(DocxDocument::try_from(path)?)),
             Some("html") => Ok(Self::Html(HtmlDocument::try_from(path)?)),
             Some("md") => Ok(Self::Md(MdDocument::try_from(path)?)),
-            Some("pdf") => Ok(Self::Pdf(PdfDocument::try_from(path)?)),
+            //Some("pdf") => Ok(Self::Pdf(PdfDocument::try_from(path)?)),
             Some("txt") => Ok(Self::Txt(TextDocument::try_from(path)?)),
             _ => Err(FsDocumentError::WrongFileType),
         }
@@ -126,10 +126,10 @@ impl IntoDocument for FsDocument {
                 .into_document()
                 .await
                 .map_err(|err| err.map_decode(TextFileDecodeError::Extract)),
-            Self::Pdf(pdf) => pdf
-                .into_document()
-                .await
-                .map_err(|err| err.map_decode(TextFileDecodeError::Pdf)),
+            //Self::Pdf(pdf) => pdf
+            //    .into_document()
+            //    .await
+            //    .map_err(|err| err.map_decode(TextFileDecodeError::Pdf)),
             Self::Txt(txt) => txt
                 .into_document()
                 .await
