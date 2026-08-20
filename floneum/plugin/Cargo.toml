@@ -20,10 +20,7 @@ url = "2.4.0"
 anyhow = "1.0.71"
 parking_lot = { workspace = true }
 tracing = "0.1.37"
-# Capped to <1.0.22 because headless_chrome 1.0.22 requires serde >=1.0.228,
-# which conflicts with holochain_serialized_bytes (coasys fork) pinned to
-# serde =1.0.219 for swc_common 8.1.1 compat in AD4M.
-headless_chrome = { version = ">=1.0, <1.0.22", features = ["fetch"]}
+headless_chrome = { version = "1.0", features = ["fetch"]}
 heed = "0.20.0-alpha.9"
 floneumite = { path = "../floneumite" }
 kalosm = { workspace = true, features = ["language", "surrealdb"] }
