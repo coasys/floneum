@@ -30,7 +30,10 @@ tempfile = "3.8.0"
 rss = { version = "2.0.6", features = ["atom"] }
 scraper = { version = "0.19.0", features = ["atomic"] }
 kalosm-language-model = { workspace = true }
-headless_chrome = { version = "1.0" }
+# Capped to <1.0.22 because headless_chrome 1.0.22 requires serde >=1.0.228,
+# which conflicts with holochain_serialized_bytes (coasys fork) pinned to
+# serde =1.0.219 for swc_common 8.1.1 compat in AD4M.
+headless_chrome = { version = ">=1.0, <1.0.22" }
 candle-core.workspace = true
 candle-nn.workspace = true
 tokio-util = { version = "0.7.9", features = ["rt"] }
